@@ -1,4 +1,6 @@
 use zkm_core_executor::ExecutionRecord;
+#[cfg(feature = "gpu")]
+use zkm_stark::MachineProvingKey;
 use zkm_stark::{MachineProver, StarkGenericConfig};
 
 use crate::contexts::ProveContext;

@@ -27,7 +27,7 @@ use zkm_stark::{
 };
 
 pub use crate::contexts::SplitContext;
-use crate::{get_prover, NetworkProve, FIRST_LAYER_BATCH_SIZE, KEY_CACHE};
+use crate::{get_prover, NetworkProve, ProverComponents, FIRST_LAYER_BATCH_SIZE,KEY_CACHE};
 
 #[derive(Default)]
 pub struct Executor {}
@@ -97,7 +97,7 @@ impl Executor {
     #[allow(clippy::too_many_arguments)]
     pub fn split_with_context<'a>(
         &self,
-        prover: &'a ZKMProver,
+        prover: &'a ZKMProver<ProverComponents>,
         ctx: &SplitContext,
         program: Program,
         vk: &StarkVerifyingKey<CoreSC>,

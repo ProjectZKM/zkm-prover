@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .add_service(StageServiceServer::new(stage))
             .serve(addr)
     } else {
-        #[cfg(all(feature = "prover", feature = "gpu"))]
+        #[cfg(feature = "prover_gpu")]
         {
             plonky2::create_ctx(13, 13);
             plonky2::init_globalmem(134217728);
@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // res = file_server => res?,
     }
 
-    #[cfg(all(feature = "prover", feature = "gpu"))]
+    #[cfg(feature = "prover_gpu")]
     if !args.stage {
         plonky2::destroy_ctx();
     }

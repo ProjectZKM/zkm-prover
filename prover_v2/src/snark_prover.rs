@@ -1,5 +1,5 @@
 use crate::contexts::SnarkContext;
-use crate::{get_prover, NetworkProve, WRAP_KEYS};
+use crate::{get_prover, NetworkProve, ProverComponents, WRAP_KEYS};
 use std::path::PathBuf;
 use tracing::instrument;
 use zkm_core_executor::ZKMReduceProof;
@@ -55,7 +55,7 @@ impl SnarkProver {
     #[instrument(name = "wrap_bn254", level = "info", skip_all)]
     fn wrap_bn254(
         &self,
-        prover: &ZKMProver,
+        prover: &ZKMProver<ProverComponents>,
         compressed_proof: ZKMReduceProof<InnerSC>,
         opts: ZKMProverOpts,
     ) -> Result<ZKMReduceProof<OuterSC>, ZKMRecursionProverError> {
