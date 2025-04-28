@@ -73,6 +73,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             plonky2::init_globalmem(134217728);
             prover::init_stark_op_stream_simple();
         }
+        #[cfg(feature = "prover_v2_gpu")]
+        zkm_cuda_adaptor::ffi::create_ctx();
         let prover = ProverServiceSVC::new(runtime_config.clone());
         server
             .add_service(ProverServiceServer::new(prover))

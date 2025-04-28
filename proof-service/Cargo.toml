@@ -10,6 +10,7 @@ prover = { path = "../prover", optional = true }
 prover_v2 = { path = "../prover_v2", optional = true }
 
 plonky2 = { git = "https://github.com/zkMIPS/plonky2.git", branch = "zkm_dev", optional = true }
+zkm-cuda-adaptor = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network", optional = true }
 
 common = { path = "../common" }
 
@@ -54,4 +55,4 @@ prover = ["dep:prover"]
 prover_v2 = ["dep:prover_v2"]
 
 prover_gpu = ["prover", "dep:plonky2", "prover/gpu"]
-prover_v2_gpu = ["prover_v2", "prover_v2/gpu"]
+prover_v2_gpu = ["prover_v2", "dep:zkm-cuda-adaptor", "prover_v2/gpu"]
