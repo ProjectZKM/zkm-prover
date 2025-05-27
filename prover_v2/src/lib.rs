@@ -1,13 +1,12 @@
 use lru::LruCache;
 use once_cell::sync::OnceCell;
-use std::sync::{Mutex, MutexGuard};
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use zkm_core_executor::ZKMContextBuilder;
 use zkm_core_machine::io::ZKMStdin;
 #[cfg(feature = "gpu")]
-use zkm_cuda_adaptor::GpuProverComponents;
+use zkm_cuda_adaptor::{gpu_prover::CudaProvingKey, GpuProverComponents};
 #[cfg(not(feature = "gpu"))]
 use zkm_prover::components::DefaultProverComponents;
 use zkm_prover::{CoreSC, OuterSC, ZKMProver};
@@ -75,13 +74,18 @@ static WRAP_KEYS: OnceCell<(StarkProvingKey<OuterSC>, StarkVerifyingKey<OuterSC>
 
 const DEFAULT_CACHE_SIZE: usize = 3;
 
+#[cfg(not(feature = "gpu"))]
+type ProvingKey = StarkProvingKey<CoreSC>;
+#[cfg(feature = "gpu")]
+type ProvingKey = CudaProvingKey;
+
 pub struct StarkKeyCache {
-    pub cache: LruCache<String, (StarkProvingKey<CoreSC>, StarkVerifyingKey<CoreSC>)>,
+    pub cache: LruCache<String, (ProvingKey, StarkVerifyingKey<CoreSC>)>,
 }
 
 impl StarkKeyCache {
     pub fn new(size: usize) -> Self {
-        let cache = LruCache::<String, (StarkProvingKey<CoreSC>, StarkVerifyingKey<CoreSC>)>::new(
+        let cache = LruCache::<String, (ProvingKey, StarkVerifyingKey<CoreSC>)>::new(
             NonZeroUsize::new(size).unwrap(),
         );
         Self { cache }
@@ -89,7 +93,7 @@ impl StarkKeyCache {
     pub fn contains(&mut self, key: &String) -> bool {
         self.cache.get(key).is_some()
     }
-    pub fn push(&mut self, key: String, v: (StarkProvingKey<CoreSC>, StarkVerifyingKey<CoreSC>)) {
+    pub fn push(&mut self, key: String, v: (ProvingKey, StarkVerifyingKey<CoreSC>)) {
         self.cache.push(key.clone(), v);
     }
 }
