@@ -224,6 +224,7 @@ impl ProverService for ProverServiceSVC {
                 proof_id: request.get_ref().proof_id.clone(),
                 program_id: request.get_ref().program_id.clone(),
                 index: request.get_ref().index as usize,
+                elf_path: request.get_ref().elf_path.clone(),
                 segment: request.get_ref().segment.clone(),
                 seg_size: request.get_ref().seg_size,
             };

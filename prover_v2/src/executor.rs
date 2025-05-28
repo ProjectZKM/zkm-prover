@@ -12,8 +12,8 @@ use std::time::Instant;
 use p3_maybe_rayon::prelude::*;
 use zkm_core_executor::{
     events::{format_table_line, sorted_table_lines},
-    ExecutionRecord, ExecutionReport, Executor as Runtime, Program, SubproofVerifier, ZKMContext,
-    ZKMReduceProof,
+    ExecutionRecord, ExecutionReport, ExecutionState, Executor as Runtime, Program,
+    SubproofVerifier, ZKMContext, ZKMReduceProof,
 };
 use zkm_core_machine::{
     io::ZKMStdin,
@@ -27,7 +27,10 @@ use zkm_stark::{
 };
 
 pub use crate::contexts::SplitContext;
-use crate::{get_prover, NetworkProve, FIRST_LAYER_BATCH_SIZE, KEY_CACHE};
+use crate::{
+    get_prover, NetworkProve, Segment, StateWithPublicValues, FIRST_LAYER_BATCH_SIZE, KEY_CACHE,
+    PROGRAM_CACHE,
+};
 
 #[derive(Default)]
 pub struct Executor {}
@@ -55,20 +58,28 @@ impl Executor {
             tracing::info!("Write {} receipts", receipts.len());
         }
 
-        let elf_path = ctx.elf_path.clone();
-        tracing::info!("split {} load elf file", elf_path);
-        let elf = file::new(&elf_path).read()?;
+        let mut program_cache = PROGRAM_CACHE.lock().unwrap();
+        let program = if let Some(program) = program_cache.cache.get(&ctx.program_id) {
+            tracing::info!("load program from cache");
+            program
+        } else {
+            tracing::info!("No program in cache, generate new program");
+            let elf_path = ctx.elf_path.clone();
+            let elf = file::new(&elf_path).read()?;
+            let program = prover
+                .get_program(&elf)
+                .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+            program_cache.push(ctx.program_id.clone(), program);
+            program_cache.cache.get(&ctx.program_id).unwrap()
+        };
 
-        let program = prover
-            .get_program(&elf)
-            .map_err(|e| anyhow::Error::msg(e.to_string()))?;
         let mut cache = KEY_CACHE.lock().unwrap();
         let vk = if let Some((_, vk)) = cache.cache.get(&ctx.program_id) {
             tracing::info!("load vk from cache");
             vk
         } else {
             tracing::info!("No vk in cache, generate new keys");
-            let (pk, vk) = prover.core_prover.setup(&program);
+            let (pk, vk) = prover.core_prover.setup(program);
             cache.push(ctx.program_id.clone(), (pk, vk));
             &cache.cache.get(&ctx.program_id).unwrap().1
         };
@@ -99,7 +110,7 @@ impl Executor {
         &self,
         prover: &'a ZKMProver,
         ctx: &SplitContext,
-        program: Program,
+        program: &Program,
         vk: &StarkVerifyingKey<CoreSC>,
         stdin: &ZKMStdin,
         opts: ZKMCoreOpts,
@@ -146,6 +157,10 @@ impl Executor {
                             let (checkpoint, done) = runtime
                                 .execute_state(false)
                                 .map_err(ZKMCoreProverError::ExecutionError)?;
+
+                            let serialized = bincode::serialize(&checkpoint)
+                                .expect("Failed to serialize checkpoint");
+                            tracing::info!("Checkpoint size: {} bytes", serialized.len());
 
                             // Save the checkpoint to a temp file.
                             let mut checkpoint_file =
@@ -197,16 +212,26 @@ impl Executor {
                             let received = { checkpoints_rx.lock().unwrap().recv() };
                             if let Ok((index, mut checkpoint, done)) = received {
                                 // Trace the checkpoint and reconstruct the execution records.
+                                let now = Instant::now();
+                                let mut reader = std::io::BufReader::new(&checkpoint);
+                                let exe_state: ExecutionState =
+                                    bincode::deserialize_from(&mut reader)
+                                        .expect("failed to deserialize state");
                                 let (mut records, report) =
                                     tracing::debug_span!("trace checkpoint").in_scope(|| {
                                         trace_checkpoint::<CoreSC>(
                                             program.clone(),
-                                            &checkpoint,
+                                            exe_state.clone(),
                                             opts,
                                             shape_config,
                                         )
                                     });
-                                tracing::info!("generated {} records", records.len());
+                                tracing::info!(
+                                    "generated {} records in {:?}",
+                                    records.len(),
+                                    now.elapsed()
+                                );
+                                debug_assert_eq!(records.len(), 1);
                                 *report_aggregate.lock().unwrap() += report;
                                 // reset_seek(&mut checkpoint);
                                 checkpoint
@@ -239,7 +264,7 @@ impl Executor {
 
                                 // See if any deferred shards are ready to be committed to.
                                 let mut deferred = deferred.split(done, opts.split_opts);
-                                tracing::debug!("deferred {} records", deferred.len());
+                                tracing::info!("deferred {} records", deferred.len());
 
                                 // Update the public values & prover state for the shards which do not
                                 // contain "cpu events" before committing to them.
@@ -259,11 +284,10 @@ impl Executor {
                                     state.start_pc = state.next_pc;
                                     record.public_values = *state;
                                 }
-                                records.append(&mut deferred);
 
                                 let mut segment_index = segment_index.lock().unwrap();
                                 let base_index = *segment_index;
-                                *segment_index += records.len();
+                                *segment_index += records.len() + deferred.len();
 
                                 write_file(
                                     format!("{}/segments.txt", ctx.seg_path),
@@ -274,18 +298,27 @@ impl Executor {
                                 // Let another worker update the state.
                                 record_gen_sync.advance_turn();
 
-                                records.par_iter().enumerate().for_each(|(i, record)| {
+                                let segments: Vec<_> = std::iter::once(Segment::State(Box::new(
+                                    StateWithPublicValues {
+                                        state: exe_state,
+                                        public_values: records[0].public_values,
+                                    },
+                                )))
+                                .chain(deferred.into_iter().map(|r| Segment::Record(Box::new(r))))
+                                .collect();
+
+                                segments.par_iter().enumerate().for_each(|(i, segment)| {
                                     let now = Instant::now();
-                                    let encoded_record = bincode::serialize(&record).unwrap();
+                                    let encoded_segment = bincode::serialize(&segment).unwrap();
                                     // use zstd to compress, level = 2 or 3
-                                    let encoded_record =
-                                        zstd::stream::encode_all(&*encoded_record, 2)
+                                    let compressed_segment =
+                                        zstd::stream::encode_all(&*encoded_segment, 2)
                                             .expect("zstd compress failed");
                                     write_file(
                                         format!("{}/{}", ctx.seg_path, base_index + i),
-                                        &encoded_record,
+                                        &compressed_segment,
                                     )
-                                    .expect("Failed to write record");
+                                    .expect("Failed to write segment");
 
                                     tracing::info!(
                                         "Wrote record {} in {:?}",
@@ -295,8 +328,16 @@ impl Executor {
                                 });
 
                                 // process deferred proofs
-                                if done {
-                                    let last_record = records.last().unwrap();
+                                if done && !stdin.proofs.is_empty() {
+                                    let last_record = if segments.len() == 1 {
+                                        records.last().unwrap()
+                                    } else {
+                                        let last_segment = segments.last().unwrap();
+                                        match last_segment {
+                                            Segment::Record(record) => record,
+                                            _ => unreachable!("last segment should be a record"),
+                                        }
+                                    };
                                     let last_pv = last_record.public_values();
                                     let last_proof_pv = last_pv.as_slice().borrow();
                                     let deferred_proofs = stdin

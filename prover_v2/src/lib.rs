@@ -1,12 +1,13 @@
 use lru::LruCache;
 use once_cell::sync::OnceCell;
+use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::Duration;
-use zkm_core_executor::ZKMContextBuilder;
+use zkm_core_executor::{ExecutionRecord, ExecutionState, Program, ZKMContextBuilder};
 use zkm_core_machine::io::ZKMStdin;
 use zkm_prover::{CoreSC, OuterSC, ZKMProver};
-use zkm_stark::{StarkProvingKey, StarkVerifyingKey, ZKMProverOpts};
+use zkm_stark::{PublicValues, StarkProvingKey, StarkVerifyingKey, ZKMProverOpts};
 
 pub use zkm_sdk;
 
@@ -50,6 +51,18 @@ impl NetworkProve<'_> {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StateWithPublicValues {
+    pub state: ExecutionState,
+    pub public_values: PublicValues<u32, u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Segment {
+    State(Box<StateWithPublicValues>),
+    Record(Box<ExecutionRecord>),
+}
+
 static GLOBAL_PROVER: OnceCell<Mutex<ZKMProver>> = OnceCell::new();
 fn prover_instance() -> &'static Mutex<ZKMProver> {
     GLOBAL_PROVER.get_or_init(|| Mutex::new(ZKMProver::new()))
@@ -85,7 +98,26 @@ impl StarkKeyCache {
     }
 }
 
+pub struct ProgramCache {
+    pub cache: LruCache<String, Program>,
+}
+
+impl ProgramCache {
+    pub fn new(size: usize) -> Self {
+        let cache = LruCache::<String, Program>::new(NonZeroUsize::new(size).unwrap());
+        Self { cache }
+    }
+    pub fn contains(&mut self, key: &String) -> bool {
+        self.cache.get(key).is_some()
+    }
+    pub fn push(&mut self, key: String, v: Program) {
+        self.cache.push(key.clone(), v);
+    }
+}
+
 lazy_static::lazy_static! {
     pub static ref KEY_CACHE: Mutex<StarkKeyCache> =
         Mutex::new(StarkKeyCache::new(DEFAULT_CACHE_SIZE));
+        pub static ref PROGRAM_CACHE: Mutex<ProgramCache> =
+        Mutex::new(ProgramCache::new(DEFAULT_CACHE_SIZE));
 }

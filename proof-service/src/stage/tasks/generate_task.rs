@@ -58,7 +58,7 @@ impl GenerateTask {
             Program {
                 version: self.version.into(),
                 seg_size: self.seg_size,
-                elf_data: common::file::new(&self.elf_path).read().unwrap(),
+                elf_path: self.elf_path.clone(),
                 block_no: self.block_no,
                 block_data,
                 public_input_stream: safe_read(&self.public_input_path),

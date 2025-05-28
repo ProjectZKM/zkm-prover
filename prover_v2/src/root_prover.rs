@@ -1,8 +1,9 @@
-use zkm_core_executor::ExecutionRecord;
-use zkm_stark::{MachineProver, StarkGenericConfig};
-
 use crate::contexts::ProveContext;
-use crate::{get_prover, NetworkProve, KEY_CACHE};
+use crate::{get_prover, NetworkProve, Segment, KEY_CACHE, PROGRAM_CACHE};
+use common::file;
+use zkm_core_machine::utils::trace_checkpoint;
+use zkm_prover::CoreSC;
+use zkm_stark::{MachineProver, StarkGenericConfig};
 
 #[derive(Default)]
 pub struct RootProver {}
@@ -10,7 +11,7 @@ pub struct RootProver {}
 impl RootProver {
     pub fn prove(&self, ctx: &ProveContext) -> anyhow::Result<Vec<u8>> {
         let now = std::time::Instant::now();
-        let mut record: ExecutionRecord = {
+        let segment: Segment = {
             let mut retries = 0;
             const MAX_RETRIES: usize = 10;
 
@@ -21,7 +22,7 @@ impl RootProver {
                             .map_err(|e| std::io::Error::other(format!("zstd decode failed: {e}")))
                     })
                     .and_then(|decoded| {
-                        bincode::deserialize::<ExecutionRecord>(&decoded).map_err(|e| {
+                        bincode::deserialize::<Segment>(&decoded).map_err(|e| {
                             std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
                                 format!("deserialize failed: {e}"),
@@ -50,8 +51,40 @@ impl RootProver {
 
         let network_prove = NetworkProve::new(ctx.seg_size);
         let opts = network_prove.opts.core_opts;
-
         let prover = get_prover();
+
+        let mut record = match segment {
+            Segment::State(state) => {
+                let mut program_cache = PROGRAM_CACHE.lock().unwrap();
+                let program = if let Some(program) = program_cache.cache.get(&ctx.program_id) {
+                    tracing::info!("load program from cache");
+                    program
+                } else {
+                    tracing::info!("No program in cache, generate new program");
+                    let elf = file::new(&ctx.elf_path).read()?;
+                    let program = prover
+                        .get_program(&elf)
+                        .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+                    program_cache.push(ctx.program_id.clone(), program);
+                    program_cache.cache.get(&ctx.program_id).unwrap()
+                };
+                let public_values = state.public_values;
+                let (records, _) = tracing::debug_span!("trace checkpoint").in_scope(|| {
+                    trace_checkpoint::<CoreSC>(
+                        program.clone(),
+                        state.state,
+                        opts,
+                        prover.core_shape_config.as_ref(),
+                    )
+                });
+                let mut record = records.into_iter().next().unwrap();
+                let _ = record.defer();
+                record.public_values = public_values;
+                record
+            }
+            Segment::Record(record) => *record,
+        };
+
         let now = std::time::Instant::now();
         let mut cache = KEY_CACHE.lock().unwrap();
         let pk = if let Some((pk, _)) = cache.cache.get(&ctx.program_id) {

@@ -94,7 +94,7 @@ message ProveRequest {
   //  bytes segment = 4;
   optional uint64 block_no = 5;
   uint32 seg_size = 6;
-  //string receipt_path = 7;
+  string elf_path = 7;
   repeated bytes receipts_input = 8;
   uint32 index = 9;
 }

@@ -52,7 +52,7 @@ pub struct ProveContext {
     pub proof_id: String,
     pub program_id: String,
     pub index: usize,
-    // pub elf: Vec<u8>,
+    pub elf_path: String,
     // execution record
     // pub segment: Vec<u8>,
     pub segment: String,

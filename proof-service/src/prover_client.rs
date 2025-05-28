@@ -149,6 +149,7 @@ pub async fn prove(mut prove_task: ProveTask, tls_config: Option<TlsConfig>) -> 
             segment: prove_task.segment.clone(),
             block_no: prove_task.program.block_no,
             seg_size: prove_task.program.seg_size,
+            elf_path: prove_task.program.elf_path.clone(),
             receipts_input: prove_task.program.receipts.clone(),
             index: prove_task.file_no as u32,
         };
@@ -214,9 +215,11 @@ pub async fn aggregate(mut agg_task: AggTask, tls_config: Option<TlsConfig>) -> 
         let mut grpc_request = Request::new(request);
         grpc_request.set_timeout(Duration::from_secs(TASK_TIMEOUT));
         let response = client.aggregate(grpc_request).await;
-        let mut status = node_status.lock().unwrap();
-        *status = NodeStatus::Idle;
+        // let mut status = node_status.lock().unwrap();
+        // *status = NodeStatus::Idle;
         if let Ok(response) = response {
+            let mut status = node_status.lock().unwrap();
+            *status = NodeStatus::Idle;
             if let Some(response_result) = response.get_ref().result.as_ref() {
                 agg_task.state = result_code_to_state(response_result.code);
                 agg_task.trace.node_info = addrs.clone();
