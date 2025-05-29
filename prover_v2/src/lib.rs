@@ -69,23 +69,22 @@ pub fn get_prover() -> MutexGuard<'static, ZKMProver<ProverComponents>> {
         .expect("GLOBAL_PROVER lock poisoned")
 }
 
-static WRAP_KEYS: OnceCell<(StarkProvingKey<OuterSC>, StarkVerifyingKey<OuterSC>)> =
-    OnceCell::new();
+#[cfg(not(feature = "gpu"))]
+type ProvingKey<T> = StarkProvingKey<T>;
+#[cfg(feature = "gpu")]
+type ProvingKey<T> = CudaProvingKey<T>;
+
+static WRAP_KEYS: OnceCell<(ProvingKey<OuterSC>, StarkVerifyingKey<OuterSC>)> = OnceCell::new();
 
 const DEFAULT_CACHE_SIZE: usize = 3;
 
-#[cfg(not(feature = "gpu"))]
-type ProvingKey = StarkProvingKey<CoreSC>;
-#[cfg(feature = "gpu")]
-type ProvingKey = CudaProvingKey;
-
 pub struct StarkKeyCache {
-    pub cache: LruCache<String, (ProvingKey, StarkVerifyingKey<CoreSC>)>,
+    pub cache: LruCache<String, (ProvingKey<CoreSC>, StarkVerifyingKey<CoreSC>)>,
 }
 
 impl StarkKeyCache {
     pub fn new(size: usize) -> Self {
-        let cache = LruCache::<String, (ProvingKey, StarkVerifyingKey<CoreSC>)>::new(
+        let cache = LruCache::<String, (ProvingKey<CoreSC>, StarkVerifyingKey<CoreSC>)>::new(
             NonZeroUsize::new(size).unwrap(),
         );
         Self { cache }
@@ -93,7 +92,7 @@ impl StarkKeyCache {
     pub fn contains(&mut self, key: &String) -> bool {
         self.cache.get(key).is_some()
     }
-    pub fn push(&mut self, key: String, v: (ProvingKey, StarkVerifyingKey<CoreSC>)) {
+    pub fn push(&mut self, key: String, v: (ProvingKey<CoreSC>, StarkVerifyingKey<CoreSC>)) {
         self.cache.push(key.clone(), v);
     }
 }
