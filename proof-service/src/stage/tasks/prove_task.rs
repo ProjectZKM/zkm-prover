@@ -22,4 +22,6 @@ pub struct ProveTask {
     #[serde(skip_serializing, skip_deserializing)]
     pub output: Vec<u8>, // output_receipt
     pub trace: Trace,
+    // Number of times this task has failed
+    pub failure_count: u32,
 }

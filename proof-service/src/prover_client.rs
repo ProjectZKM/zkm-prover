@@ -12,6 +12,7 @@ use crate::stage::tasks::{
 use tonic::Request;
 
 use crate::prover_node::{NodeStatus, ProverNode};
+use crate::stage::stage::get_timestamp;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -54,17 +55,33 @@ async fn get_idle_client(
     for mut node in nodes {
         {
             let mut status = node.status.lock().unwrap();
-            if *status != NodeStatus::Idle {
+            if *status == NodeStatus::Busy {
                 continue;
             }
+            if status.is_offline() {
+                // If the node is offline for less than 180s, we skip it.
+                if let Some(ts) = status.offline_since() {
+                    if ts + 180 > get_timestamp() {
+                        continue;
+                    }
+                }
+                // unset the client if it was offline more than 180s, and will reconnect later
+                *node.client.lock().unwrap() = None;
+            }
+
             *status = NodeStatus::Busy;
         }
 
         if let Some(client) = node.is_active(tls_config.clone()).await {
             return Some((node.addr.clone(), client, node.status.clone()));
         } else {
+            {
+                let mut status = node.status.lock().unwrap();
+                *status = NodeStatus::OffLine(get_timestamp());
+            }
+
             tracing::warn!(
-                "Node {} is unreachable, marked Busy to avoid reuse",
+                "Node {} is unreachable, marked Offline to avoid reuse",
                 node.addr
             );
         }
@@ -108,12 +125,13 @@ pub async fn split(mut split_task: SplitTask, tls_config: Option<TlsConfig>) -> 
             request.proof_id,
             request.computed_request_id
         );
+        let now = std::time::Instant::now();
         let mut grpc_request = Request::new(request);
         grpc_request.set_timeout(Duration::from_secs(TASK_TIMEOUT));
         let response = client.split_elf(grpc_request).await;
         let mut status = node_status.lock().unwrap();
-        *status = NodeStatus::Idle;
         if let Ok(response) = response {
+            *status = NodeStatus::Idle;
             if let Some(response_result) = response.get_ref().result.as_ref() {
                 split_task.state = result_code_to_state(response_result.code);
                 // FIXME: node_info usage?
@@ -121,17 +139,24 @@ pub async fn split(mut split_task: SplitTask, tls_config: Option<TlsConfig>) -> 
                 split_task.total_steps = response.get_ref().total_steps;
                 split_task.total_segments = response.get_ref().total_segments;
                 tracing::info!(
-                    "[split] rpc {} {}:{} code:{:?} message:{:?} end. Total cycles {}, segments {}",
+                    "[split] rpc {} {}:{} code:{:?} message:{:?} end. Elapsed {:?}, {} cycles, {} segments",
                     addrs,
                     response.get_ref().proof_id,
                     response.get_ref().computed_request_id,
                     response_result.code,
                     response_result.message,
+                    now.elapsed(),
                     split_task.total_steps,
                     split_task.total_segments,
                 );
                 return Some(split_task);
             }
+        } else {
+            *status = NodeStatus::OffLine(get_timestamp());
+            tracing::warn!(
+                "Node {} is unreachable, marked Offline to avoid reuse",
+                addrs
+            );
         }
     }
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -142,6 +167,12 @@ pub async fn prove(mut prove_task: ProveTask, tls_config: Option<TlsConfig>) -> 
     prove_task.state = TASK_STATE_UNPROCESSED;
     let client = get_idle_client(tls_config, TaskType::Prove).await;
     if let Some((addrs, mut client, node_status)) = client {
+        if prove_task.trace.node_info == addrs {
+            // If the task is already failed and the node is the same, skip it
+            let mut status = node_status.lock().unwrap();
+            *status = NodeStatus::Idle;
+            return Some(prove_task);
+        }
         let request = ProveRequest {
             proof_id: prove_task.program.proof_id.clone(),
             computed_request_id: prove_task.task_id.clone(),
@@ -160,28 +191,35 @@ pub async fn prove(mut prove_task: ProveTask, tls_config: Option<TlsConfig>) -> 
             request.computed_request_id,
             request.index
         );
+        let now = std::time::Instant::now();
         let mut grpc_request = Request::new(request);
         grpc_request.set_timeout(Duration::from_secs(TASK_TIMEOUT));
         let response = client.prove(grpc_request).await;
+        let mut status = node_status.lock().unwrap();
         if let Ok(response) = response {
-            //  If the server does not respond, keep the previous busy status to prevent reuse.
-            let mut status = node_status.lock().unwrap();
             *status = NodeStatus::Idle;
             if let Some(response_result) = response.get_ref().result.as_ref() {
                 prove_task.state = result_code_to_state(response_result.code);
                 prove_task.trace.node_info = addrs.clone();
                 tracing::info!(
-                    "[prove] rpc {} {}:{}:{} code:{:?} message:{:?} end",
+                    "[prove] rpc {} {}:{}:{} code:{:?} message:{:?} end, elapsed {:?}",
                     addrs,
                     response.get_ref().proof_id,
                     response.get_ref().computed_request_id,
                     prove_task.file_no,
                     response_result.code,
                     response_result.message,
+                    now.elapsed(),
                 );
                 prove_task.output = response.get_ref().output_receipt.clone();
                 return Some(prove_task);
             }
+        } else {
+            *status = NodeStatus::OffLine(get_timestamp());
+            tracing::warn!(
+                "Node {} is unreachable, marked Offline to avoid reuse",
+                addrs
+            );
         }
     }
     // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -212,32 +250,38 @@ pub async fn aggregate(mut agg_task: AggTask, tls_config: Option<TlsConfig>) -> 
             agg_task.agg_index,
             request.inputs.len()
         );
+        let now = std::time::Instant::now();
         let mut grpc_request = Request::new(request);
         grpc_request.set_timeout(Duration::from_secs(TASK_TIMEOUT));
         let response = client.aggregate(grpc_request).await;
-        // let mut status = node_status.lock().unwrap();
-        // *status = NodeStatus::Idle;
+        let mut status = node_status.lock().unwrap();
         if let Ok(response) = response {
-            let mut status = node_status.lock().unwrap();
             *status = NodeStatus::Idle;
             if let Some(response_result) = response.get_ref().result.as_ref() {
                 agg_task.state = result_code_to_state(response_result.code);
                 agg_task.trace.node_info = addrs.clone();
                 tracing::info!(
-                    "[aggregate] rpc {} {}:{}:{} code:{:?} message:{:?} end",
+                    "[aggregate] rpc {} {}:{}:{} code:{:?} message:{:?} end, elapsed {:?}",
                     addrs,
                     response.get_ref().proof_id,
                     response.get_ref().computed_request_id,
                     agg_task.agg_index,
                     response_result.code,
                     response_result.message,
+                    now.elapsed(),
                 );
                 agg_task.output = response.get_ref().agg_receipt.clone();
                 return Some(agg_task);
             }
+        } else {
+            *status = NodeStatus::OffLine(get_timestamp());
+            tracing::warn!(
+                "Node {} is unreachable, marked Offline to avoid reuse",
+                addrs
+            );
         }
     }
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     Some(agg_task)
 }
 pub async fn snark_proof(
@@ -262,8 +306,8 @@ pub async fn snark_proof(
         grpc_request.set_timeout(Duration::from_secs(TASK_TIMEOUT));
         let response = client.snark_proof(grpc_request).await;
         let mut status = node_status.lock().unwrap();
-        *status = NodeStatus::Idle;
         if let Ok(response) = response {
+            *status = NodeStatus::Idle;
             if let Some(response_result) = response.get_ref().result.as_ref() {
                 if ResultCode::from_i32(response_result.code) == Some(ResultCode::Ok) {
                     tracing::info!(
@@ -280,12 +324,18 @@ pub async fn snark_proof(
                     return Some(snark_task);
                 }
             }
+        } else {
+            *status = NodeStatus::OffLine(get_timestamp());
+            tracing::warn!(
+                "Node {} is unreachable, marked Offline to avoid reuse",
+                addrs
+            );
         }
         snark_task.state = TASK_STATE_FAILED;
     } else {
         snark_task.state = TASK_STATE_UNPROCESSED;
     }
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     Some(snark_task)
 }
 

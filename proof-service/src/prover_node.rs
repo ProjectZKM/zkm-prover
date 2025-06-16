@@ -13,6 +13,21 @@ use tonic::transport::Uri;
 pub enum NodeStatus {
     Idle,
     Busy,
+    OffLine(u64), // timestamp of when the node went offline
+}
+
+impl NodeStatus {
+    pub fn is_offline(&self) -> bool {
+        matches!(self, NodeStatus::OffLine(_))
+    }
+
+    pub fn offline_since(&self) -> Option<u64> {
+        if let NodeStatus::OffLine(ts) = self {
+            Some(*ts)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

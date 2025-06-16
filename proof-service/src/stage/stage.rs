@@ -53,6 +53,40 @@ macro_rules! on_task {
     };
 }
 
+macro_rules! on_prove_task {
+    ($src:ident, $dst:ident, $stage:ident) => {
+        //assert!($src.proof_id == $dst.proof_id);
+        if $src.state == TASK_STATE_FAILED
+            || $src.state == TASK_STATE_SUCCESS
+            || $src.state == TASK_STATE_UNPROCESSED
+        {
+            $dst.state = $src.state;
+            if TASK_STATE_UNPROCESSED != $src.state {
+                $dst.trace.finish_ts = get_timestamp();
+                $src.trace.finish_ts = $dst.trace.finish_ts;
+                $dst.trace.node_info = $src.trace.node_info.clone();
+
+                // Fill in the output of the source task.
+                $dst.output = $src.output.clone();
+            }
+            if TASK_STATE_FAILED == $src.state {
+                // If the task is failed, we increase the failure count.
+                // If the failure count reaches 3, we mark the stage as error.
+                if $dst.failure_count < 3 {
+                    tracing::warn!(
+                        "[prove] {}:{} failed, try again...",
+                        $src.proof_id,
+                        $src.task_id
+                    );
+                    $dst.failure_count += 1;
+                } else {
+                    $stage.is_error = true;
+                }
+            }
+        }
+    };
+}
+
 macro_rules! get_task {
     ($src:ident) => {
         if $src.state == TASK_STATE_UNPROCESSED || $src.state == TASK_STATE_FAILED {
@@ -222,6 +256,7 @@ impl Stage {
             program: self.generate_task.gen_program(),
             // will be assigned after the root proving
             output: vec![],
+            failure_count: 0,
         }
     }
 
@@ -330,7 +365,7 @@ impl Stage {
     pub fn on_prove_task(&mut self, prove_task: &mut ProveTask) {
         for item_task in self.prove_tasks.iter_mut() {
             if item_task.task_id == prove_task.task_id && item_task.state == TASK_STATE_PROCESSING {
-                on_task!(prove_task, item_task, self);
+                on_prove_task!(prove_task, item_task, self);
                 break;
             }
         }
@@ -619,7 +654,7 @@ impl Debug for Stage {
         write!(
             f,
             "proof_id: {}\r\n {}\r\n {}\r\n {}\r\n {}\r\n",
-            self.generate_task.proof_id, split_cost, root_prove_cost, agg_cost, snark_cost
+            self.generate_task.proof_id, root_prove_cost, agg_cost, split_cost, snark_cost
         )
     }
 }

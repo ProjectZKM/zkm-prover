@@ -91,16 +91,9 @@ impl SnarkProver {
 
         // cache wrap_pk and wrap_vk
         let time = std::time::Instant::now();
-        let (wrap_pk, wrap_vk) = if let Some((pk, vk)) = WRAP_KEYS.get() {
-            tracing::info!("using cached pk and vk");
-            (pk.clone(), vk.clone())
-        } else {
-            tracing::info!("setup wrap_prover");
-            let (pk, vk) =
-                tracing::info_span!("setup wrap").in_scope(|| prover.wrap_prover.setup(&program));
-            WRAP_KEYS.set((pk.clone(), vk.clone())).ok();
-            (pk, vk)
-        };
+        let (wrap_pk, wrap_vk) = WRAP_KEYS.get_or_init(|| {
+            tracing::info_span!("setup wrap").in_scope(|| prover.wrap_prover.setup(&program))
+        });
         let elapsed = time.elapsed();
         tracing::info!("setup wrap time: {:?}", elapsed);
 
@@ -114,7 +107,7 @@ impl SnarkProver {
         let mut wrap_proof = prover
             .wrap_prover
             .prove(
-                &wrap_pk,
+                wrap_pk,
                 vec![runtime.record],
                 &mut wrap_challenger,
                 opts.recursion_opts,
@@ -126,12 +119,12 @@ impl SnarkProver {
         prover
             .wrap_prover
             .machine()
-            .verify(&wrap_vk, &wrap_proof, &mut wrap_challenger)
+            .verify(wrap_vk, &wrap_proof, &mut wrap_challenger)
             .unwrap();
         tracing::info!("wrapping successful");
 
         Ok(ZKMReduceProof {
-            vk: wrap_vk,
+            vk: wrap_vk.clone(),
             proof: wrap_proof.shard_proofs.pop().unwrap(),
         })
     }
