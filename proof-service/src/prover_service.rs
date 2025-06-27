@@ -353,6 +353,7 @@ impl ProverService for ProverServiceSVC {
                 proof_id: request.get_ref().proof_id.clone(),
                 // proving_key_path: self.config.get_proving_key_path(request.get_ref().version),
                 agg_receipt: request.get_ref().agg_receipt.clone(),
+                from_input: request.get_ref().from_input,
             };
 
             let pipeline = self.pipeline.clone();

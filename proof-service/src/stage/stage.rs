@@ -102,6 +102,7 @@ impl Stage {
     pub fn new(generate_task: GenerateTask) -> Self {
         Stage {
             //base_dir: generate_task.base_dir.clone(),
+            step: generate_task.from_step,
             generate_task,
             split_task: SplitTask::default(),
             prove_tasks: Vec::new(),
@@ -109,7 +110,6 @@ impl Stage {
             snark_task: SnarkTask::default(),
             is_error: false,
             errmsg: "".to_string(),
-            step: Step::Init,
             is_tasks_gen_done: false,
         }
     }
@@ -173,6 +173,11 @@ impl Stage {
                         }
                     }
                 }
+            }
+            Step::Agg => {
+                assert_eq!(self.generate_task.from_step, Step::Agg);
+                self.gen_snark_task();
+                self.step = Step::Snark;
             }
             Step::Snark => {
                 if self.snark_task.state == TASK_STATE_SUCCESS {
@@ -580,11 +585,26 @@ impl Stage {
         self.snark_task.task_id = uuid::Uuid::new_v4().to_string();
         self.snark_task.state = TASK_STATE_UNPROCESSED;
         // fill in the input receipts
-        for agg_task in &self.agg_tasks {
-            if agg_task.is_final {
-                self.snark_task.agg_receipt = agg_task.output.clone();
+        if self.generate_task.from_step == Step::Init {
+            for agg_task in &self.agg_tasks {
+                if agg_task.is_final {
+                    self.snark_task.agg_receipt = agg_task.output.clone();
+                    self.snark_task.from_input = false;
+                }
             }
+        } else if self.generate_task.from_step == Step::Agg {
+            // read from receipt_inputs_path
+            let receipt_datas = std::fs::read(&self.generate_task.receipt_inputs_path).unwrap();
+            let receipts = bincode::deserialize::<Vec<Vec<u8>>>(&receipt_datas).unwrap();
+            self.snark_task.agg_receipt = receipts[0].clone();
+            self.snark_task.from_input = true;
+        } else {
+            unreachable!(
+                "gen_snark_task: unsupported from_step: {:?}",
+                self.generate_task.from_step
+            );
         }
+
         tracing::info!(
             "gen_snark_task: {:?} {:?}",
             self.snark_task.proof_id,

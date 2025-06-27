@@ -134,6 +134,7 @@ message SnarkProofRequest {
   string computed_request_id = 2;
   includes.v1.ProverVersion version = 3;
   bytes agg_receipt = 4;
+  bool from_input = 5; // if true, the agg_receipt is from input, otherwise it is from agg output
 }
 
 message SnarkProofResponse {

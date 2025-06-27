@@ -295,6 +295,7 @@ pub async fn snark_proof(
             proof_id: snark_task.proof_id.clone(),
             computed_request_id: snark_task.task_id.clone(),
             agg_receipt: snark_task.agg_receipt.clone(),
+            from_input: snark_task.from_input,
         };
         tracing::info!(
             "[snark_proof] rpc {} {}:{} start",

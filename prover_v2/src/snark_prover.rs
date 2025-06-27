@@ -9,7 +9,10 @@ use zkm_recursion_circuit::witness::Witnessable;
 use zkm_recursion_compiler::config::InnerConfig;
 use zkm_recursion_core::Runtime;
 use zkm_sdk::ZKMProof;
-use zkm_stark::{Challenge, MachineProver, StarkGenericConfig, Val, ZKMProverOpts};
+use zkm_stark::koala_bear_poseidon2::KoalaBearPoseidon2;
+use zkm_stark::{
+    Challenge, MachineProver, StarkGenericConfig, StarkVerifyingKey, Val, ZKMProverOpts,
+};
 
 // It seems we don't need `output_dir`.
 #[derive(Default)]
@@ -24,11 +27,21 @@ impl SnarkProver {
         }
     }
     pub fn prove(&self, ctx: &SnarkContext) -> anyhow::Result<(bool, Vec<u8>)> {
-        let json_str = String::from_utf8_lossy(&ctx.agg_receipt).to_string();
-        let proof: ZKMProof = serde_json::from_str(&json_str).expect("could not deserialize proof");
-        let reduced_proof = match proof {
-            ZKMProof::Compressed(proof) => *proof,
-            _ => unreachable!("unexpected proof"),
+        let reduced_proof = if ctx.from_input {
+            let receipt: (
+                ZKMReduceProof<KoalaBearPoseidon2>,
+                StarkVerifyingKey<KoalaBearPoseidon2>,
+            ) = bincode::deserialize(&ctx.agg_receipt).map_err(|e| anyhow::anyhow!(e))?;
+
+            receipt.0
+        } else {
+            let json_str = String::from_utf8_lossy(&ctx.agg_receipt).to_string();
+            let proof: ZKMProof =
+                serde_json::from_str(&json_str).expect("could not deserialize proof");
+            match proof {
+                ZKMProof::Compressed(proof) => *proof,
+                _ => unreachable!("unexpected proof"),
+            }
         };
 
         let network_prove = NetworkProve::default();

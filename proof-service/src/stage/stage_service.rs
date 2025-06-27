@@ -245,6 +245,23 @@ impl StageService for StageServiceSVC {
                 }
             }
 
+            let from_step = request.get_ref().from_step.unwrap_or(Step::Init.into());
+            if !(from_step == Step::Init as i32 || from_step == Step::Agg as i32) {
+                let response = GenerateProofResponse {
+                    proof_id: request.get_ref().proof_id.clone(),
+                    status: InvalidParameter.into(),
+                    error_message: "invalid FromStep, only Support Init and Agg".to_string(),
+                    ..Default::default()
+                };
+                tracing::warn!(
+                    "[generate_proof] {} invalid TargetStep {:?}",
+                    request.get_ref().proof_id,
+                    from_step,
+                );
+                return Ok(Response::new(response));
+            }
+            let from_step = Step::from_i32(from_step).unwrap();
+
             let target_step = request.get_ref().target_step.unwrap_or(Step::Snark.into());
             if !(target_step == Step::Split as i32
                 || target_step == Step::Agg as i32
@@ -313,6 +330,23 @@ impl StageService for StageServiceSVC {
                     .map_err(|e| Status::internal(e.to_string()))?;
                 private_input_stream_path
             };
+
+            if from_step == Step::Agg {
+                // if from_step is Agg, we need to check if the receipt_inputs is empty
+                if request.get_ref().receipt_inputs.is_empty() {
+                    let response = GenerateProofResponse {
+                        proof_id: request.get_ref().proof_id.clone(),
+                        status: InvalidParameter.into(),
+                        error_message: "receipt_inputs should not empty".to_string(),
+                        ..Default::default()
+                    };
+                    tracing::warn!(
+                        "[generate_proof] {} empty receipt_inputs",
+                        request.get_ref().proof_id,
+                    );
+                    return Ok(Response::new(response));
+                }
+            }
 
             let receipt_inputs_path = if request.get_ref().receipt_inputs.is_empty() {
                 "".to_string()
@@ -400,6 +434,7 @@ impl StageService for StageServiceSVC {
                 &output_stream_path,
                 Some(block_no),
                 request.get_ref().seg_size,
+                from_step,
                 target_step,
                 request.get_ref().composite_proof,
                 &receipt_inputs_path,
