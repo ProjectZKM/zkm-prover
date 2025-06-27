@@ -402,6 +402,22 @@ impl StageService for StageServiceSVC {
             file::new(&wrap_dir)
                 .create_dir_all()
                 .map_err(|e| Status::internal(e.to_string()))?;
+
+            // if from_step == Agg, we need write dummy data to public values in case of panic
+            if from_step == Step::Agg {
+                let public_values_path = {
+                    #[cfg(feature = "prover")]
+                    let suffix = "json";
+                    #[cfg(feature = "prover_v2")]
+                    let suffix = "bin";
+                    format!("{}/public_values.{}", wrap_dir, suffix)
+                };
+                // Write empty vector to public_values_path file
+                file::new(&public_values_path)
+                    .write(&[])
+                    .map_err(|e| Status::internal(e.to_string()))?;
+            }
+
             let snark_dir = format!("{}/snark", dir_path);
             file::new(&snark_dir)
                 .create_dir_all()
