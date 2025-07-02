@@ -167,7 +167,7 @@ impl Stage {
                         if self.generate_task.target_step == Step::Agg {
                             self.step = Step::End;
                         } else {
-                            self.gen_snark_task(None);
+                            self.gen_snark_task();
                             self.step = Step::Snark;
                         }
                     }
@@ -175,7 +175,7 @@ impl Stage {
             }
             Step::Agg => {
                 assert_eq!(self.generate_task.from_step, Step::Agg);
-                self.gen_snark_task(None);
+                self.gen_snark_task();
                 self.step = Step::Snark;
             }
             Step::Snark => {
@@ -570,7 +570,7 @@ impl Stage {
         }
     }
 
-    pub fn gen_snark_task(&mut self, receipt: Option<Vec<u8>>) {
+    pub fn gen_snark_task(&mut self) {
         assert_eq!(self.snark_task.state, TASK_STATE_INITIAL);
         self.snark_task
             .proof_id
@@ -584,12 +584,7 @@ impl Stage {
         self.snark_task.task_id = uuid::Uuid::new_v4().to_string();
         self.snark_task.state = TASK_STATE_UNPROCESSED;
         // fill in the input receipts
-        if self.generate_task.single_node && receipt.is_some() {
-            // read from receipt
-            let receipt = receipt.unwrap();
-            self.snark_task.agg_receipt = receipt;
-            self.snark_task.from_input = false;
-        } else if self.generate_task.from_step == Step::Init {
+        if self.generate_task.from_step == Step::Init {
             for agg_task in &self.agg_tasks {
                 if agg_task.is_final {
                     self.snark_task.agg_receipt = agg_task.output.clone();
@@ -640,26 +635,30 @@ impl Stage {
         SingleNodeTask {
             task_id: uuid::Uuid::new_v4().to_string(),
             program_id: self.generate_task.program_id.clone(),
+            base_dir: self.generate_task.base_dir.clone(),
             proof_id: self.generate_task.proof_id.clone(),
             state: TASK_STATE_UNPROCESSED,
             elf_path: self.generate_task.elf_path.clone(),
             private_input_path: self.generate_task.private_input_path.clone(),
             receipt_inputs_path: self.generate_task.receipt_inputs_path.clone(),
+            target_step: self.generate_task.target_step,
             ..Default::default()
         }
     }
-    pub fn on_single_node_task(&mut self, single_node_task: &mut SingleNodeTask) {
+    pub fn on_single_node_task(&mut self, single_node_task: &SingleNodeTask) {
         if single_node_task.state == TASK_STATE_SUCCESS {
+            tracing::info!(
+                "Single node task {} success, output size: {}",
+                single_node_task.task_id,
+                single_node_task.output.len()
+            );
             if self.generate_task.target_step == Step::Agg {
                 // Here we also use snark_path to store agg proof ;
                 let mut f = std::fs::File::create(&self.generate_task.snark_path)
                     .unwrap_or_else(|_| panic!("can not open {}", &self.generate_task.snark_path));
                 f.write_all(&single_node_task.output).unwrap();
-                self.step = Step::End;
-            } else {
-                self.gen_snark_task(Some(single_node_task.output.clone()));
-                self.step = Step::Snark;
             }
+            self.step = Step::End;
         } else {
             self.is_error = true;
             tracing::error!("Single node task {} failed", single_node_task.task_id);

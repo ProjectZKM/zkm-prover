@@ -148,10 +148,12 @@ message SnarkProofResponse {
 message SingleNodeRequest {
   string proof_id = 1;
   string computed_request_id = 2;
-  string elf_path = 3;
-  string private_input_path = 4;
-  string receipt_inputs_path = 5;
-  string program_id = 6;
+  string base_dir = 3;
+  string elf_path = 4;
+  string private_input_path = 5;
+  string receipt_inputs_path = 6;
+  string program_id = 7;
+  includes.v1.Step target_step = 8;
 }
 
 message SingleNodeResponse {

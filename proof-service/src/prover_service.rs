@@ -359,7 +359,6 @@ impl ProverService for ProverServiceSVC {
         &self,
         request: Request<SingleNodeRequest>,
     ) -> tonic::Result<Response<SingleNodeResponse>, Status> {
-        tracing::info!("Single node start");
         metrics::record_metrics("prover::single_node", || async {
             tracing::info!(
                 "[single_node] {}:{} start",
@@ -370,8 +369,10 @@ impl ProverService for ProverServiceSVC {
             let single_node_context = SingleNodeContext {
                 program_id: request.get_ref().program_id.to_string(),
                 elf_path: request.get_ref().elf_path.to_string(),
+                base_dir: request.get_ref().base_dir.to_string(),
                 private_input_path: request.get_ref().private_input_path.to_string(),
                 receipt_inputs_path: request.get_ref().receipt_inputs_path.to_string(),
+                target_step: request.get_ref().target_step,
             };
 
             let pipeline = self.pipeline.clone();

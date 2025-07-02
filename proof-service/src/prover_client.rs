@@ -505,10 +505,12 @@ pub async fn single_node(
         let request = SingleNodeRequest {
             proof_id: single_node_task.proof_id.clone(),
             computed_request_id: single_node_task.task_id.clone(),
+            base_dir: single_node_task.base_dir.clone(),
             elf_path: single_node_task.elf_path.clone(),
             private_input_path: single_node_task.private_input_path.clone(),
             receipt_inputs_path: single_node_task.receipt_inputs_path.clone(),
             program_id: single_node_task.program_id.clone(),
+            target_step: single_node_task.target_step.into(),
         };
         tracing::info!(
             "[single node] rpc {} {}:{} start",

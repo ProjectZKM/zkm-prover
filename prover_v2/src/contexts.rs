@@ -86,6 +86,8 @@ pub struct SnarkContext {
 pub struct SingleNodeContext {
     pub program_id: String,
     pub elf_path: String,
+    pub base_dir: String,
     pub private_input_path: String,
     pub receipt_inputs_path: String,
+    pub target_step: i32,
 }
