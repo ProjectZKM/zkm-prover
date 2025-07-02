@@ -1,7 +1,11 @@
 use crate::proto::includes::v1::Step;
 #[cfg(feature = "prover_v2")]
 use crate::stage::safe_read;
-use crate::stage::tasks::{agg_task::AggTask, generate_task::GenerateTask, ProveTask, SingleNodeTask, SnarkTask, SplitTask, Trace, TASK_STATE_FAILED, TASK_STATE_INITIAL, TASK_STATE_PROCESSING, TASK_STATE_SUCCESS, TASK_STATE_UNPROCESSED};
+use crate::stage::tasks::{
+    agg_task::AggTask, generate_task::GenerateTask, ProveTask, SingleNodeTask, SnarkTask,
+    SplitTask, Trace, TASK_STATE_FAILED, TASK_STATE_INITIAL, TASK_STATE_PROCESSING,
+    TASK_STATE_SUCCESS, TASK_STATE_UNPROCESSED,
+};
 use rayon::prelude::*;
 use std::{
     fmt::{Debug, Formatter},
@@ -632,23 +636,18 @@ impl Stage {
         f.write_all(&snark_task.output).unwrap();
         on_task!(snark_task, dst, self);
     }
-    
     pub fn get_single_node_task(&self) -> SingleNodeTask {
         SingleNodeTask {
             task_id: uuid::Uuid::new_v4().to_string(),
             program_id: self.generate_task.program_id.clone(),
             proof_id: self.generate_task.proof_id.clone(),
             state: TASK_STATE_UNPROCESSED,
-            base_dir: self.generate_task.base_dir.clone(),
             elf_path: self.generate_task.elf_path.clone(),
-            public_input_path: self.generate_task.public_input_path.clone(),
             private_input_path: self.generate_task.private_input_path.clone(),
-            block_no: self.generate_task.block_no,
             receipt_inputs_path: self.generate_task.receipt_inputs_path.clone(),
             ..Default::default()
         }
     }
-    
     pub fn on_single_node_task(&mut self, single_node_task: &mut SingleNodeTask) {
         if single_node_task.state == TASK_STATE_SUCCESS {
             if self.generate_task.target_step == Step::Agg {
@@ -663,13 +662,9 @@ impl Stage {
             }
         } else {
             self.is_error = true;
-            tracing::error!(
-                "Single node task {} failed",
-                single_node_task.task_id
-            );
+            tracing::error!("Single node task {} failed", single_node_task.task_id);
         }
     }
-    
 }
 
 impl Debug for Stage {

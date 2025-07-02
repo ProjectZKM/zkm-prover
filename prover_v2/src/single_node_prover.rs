@@ -1,12 +1,12 @@
+use crate::contexts::SingleNodeContext;
+use crate::KEY_CACHE;
+use common::file;
 use zkm_core_executor::ZKMReduceProof;
 use zkm_core_machine::io::ZKMStdin;
 use zkm_prover::{ZKMProvingKey, ZKMVerifyingKey};
 use zkm_sdk::ProverClient;
 use zkm_stark::koala_bear_poseidon2::KoalaBearPoseidon2;
-use zkm_stark::{StarkProvingKey, StarkVerifyingKey};
-use common::file;
-use crate::contexts::SingleNodeContext;
-use crate::KEY_CACHE;
+use zkm_stark::StarkVerifyingKey;
 
 #[derive(Default)]
 pub struct SingleNodeProver {}
@@ -49,16 +49,12 @@ impl SingleNodeProver {
             let (pk, vk) = &cache.cache.get(&ctx.program_id).unwrap();
             (pk, vk)
         };
-        
-        let zkm_vk = ZKMVerifyingKey {
-            vk: StarkVerifyingKey::from(vk.clone()),
-        };
+        let zkm_vk = ZKMVerifyingKey { vk: vk.clone() };
         let zkm_pk = ZKMProvingKey {
-            pk: StarkProvingKey::from(pk.clone()),
+            pk: pk.clone(),
             elf,
-            vk: zkm_vk.clone(),
+            vk: zkm_vk,
         };
-        
         let proof = client.prove(&zkm_pk, stdin).compressed().run().unwrap();
         let reduced_proof = proof.proof;
         tracing::info!("Generated single node proof done");

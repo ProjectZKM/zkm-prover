@@ -18,10 +18,9 @@ use prover::{
 };
 #[cfg(feature = "prover_v2")]
 use prover_v2::{
-    contexts::{AggContext, ProveContext, SnarkContext, SplitContext},
+    contexts::{AggContext, ProveContext, SnarkContext, SplitContext, SingleNodeContext},
     pipeline::Pipeline,
 };
-use prover_v2::contexts::SingleNodeContext;
 
 async fn run_back_task<
     T: Send + 'static,
@@ -369,13 +368,9 @@ impl ProverService for ProverServiceSVC {
             );
             let start = Instant::now();
             let single_node_context = SingleNodeContext {
-                base_dir: request.get_ref().base_dir.to_string(),
                 program_id: request.get_ref().program_id.to_string(),
                 elf_path: request.get_ref().elf_path.to_string(),
-                block_no: request.get_ref().block_no,
-                public_input_path: request.get_ref().public_input_path.to_string(),
                 private_input_path: request.get_ref().private_input_path.to_string(),
-                args: request.get_ref().args.to_string(),
                 receipt_inputs_path: request.get_ref().receipt_inputs_path.to_string(),
             };
 
@@ -387,9 +382,7 @@ impl ProverService for ProverServiceSVC {
                 proof_id: request.get_ref().proof_id.clone(),
                 computed_request_id: request.get_ref().computed_request_id.clone(),
                 agg_receipt: match &result {
-                    Ok((_, x)) => {
-                        x.clone()
-                    },
+                    Ok((_, x)) => x.clone(),
                     _ => vec![],
                 },
                 ..Default::default()

@@ -11,6 +11,7 @@ pub struct Pipeline {
     root_prover: RootProver,
     agg_prover: AggProver,
     snark_prover: SnarkProver,
+    single_node_prover: SingleNodeProver,
 }
 
 impl Pipeline {
@@ -20,6 +21,7 @@ impl Pipeline {
             root_prover: RootProver::default(),
             agg_prover: AggProver::default(),
             snark_prover: SnarkProver::new(keys_input_dir),
+            single_node_prover: SingleNodeProver::default(),
         }
     }
 

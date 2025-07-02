@@ -84,13 +84,8 @@ pub struct SnarkContext {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SingleNodeContext {
-    pub base_dir: String,
     pub program_id: String,
     pub elf_path: String,
-    pub block_no: Option<u64>,
-    // TODO: remove
-    pub public_input_path: String,
     pub private_input_path: String,
-    pub args: String,
     pub receipt_inputs_path: String,
 }
