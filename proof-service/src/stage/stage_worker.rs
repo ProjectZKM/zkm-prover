@@ -56,6 +56,48 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
             Ok(generate_context) => {
                 let mut check_at = get_timestamp();
                 let mut stage = Stage::new(generate_context.clone());
+
+                // single node handler.
+                if generate_context.single_node && stage.step == Step::Init {
+                    stage.step = Step::Prove;
+                    // update status in the db for client get status response
+                    let _ = db
+                        .update_stage_task_check_at(
+                            &task.id,
+                            task.check_at as u64,
+                            check_at,
+                            stage.step.into(),
+                        )
+                        .await;
+
+                    // get single_node task
+                    let single_node_task = stage.get_single_node_task();
+                    let tls_config = tls_config.clone();
+                    let response = prover_client::single_node(single_node_task, tls_config).await;
+                    if let Some(mut single_node_task) = response {
+                        // handle the response
+                        stage.on_single_node_task(&mut single_node_task);
+                    }
+                    if stage.is_error() {
+                        tracing::debug!("error in single node task");
+                        let status = stage_service::v1::Status::InternalError;
+                        db.update_stage_task(&task.id, status.into(), "")
+                            .await
+                            .unwrap();
+                        return;
+                    } else {
+                        // update status in the db
+                        let _ = db
+                            .update_stage_task_check_at(
+                                &task.id,
+                                task.check_at as u64,
+                                check_at,
+                                stage.step.into(),
+                            )
+                            .await;
+                    }
+                }
+
                 let (tx, mut rx) = mpsc::channel(128);
                 stage.dispatch();
 

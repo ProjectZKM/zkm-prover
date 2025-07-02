@@ -1,14 +1,12 @@
 use crate::proto::prover_service::v1::{
     prover_service_client::ProverServiceClient, AggregateRequest, GetTaskResultRequest,
     GetTaskResultResponse, ProveRequest, ResultCode, SnarkProofRequest, SplitElfRequest,
+    SingleNodeRequest,
 };
 use common::tls::Config as TlsConfig;
 use std::sync::{Arc, Mutex};
 
-use crate::stage::tasks::{
-    AggTask, ProveTask, SnarkTask, SplitTask, TASK_STATE_FAILED, TASK_STATE_PROCESSING,
-    TASK_STATE_SUCCESS, TASK_STATE_UNPROCESSED, TASK_TIMEOUT,
-};
+use crate::stage::tasks::{AggTask, ProveTask, SingleNodeTask, SnarkTask, SplitTask, TASK_STATE_FAILED, TASK_STATE_PROCESSING, TASK_STATE_SUCCESS, TASK_STATE_UNPROCESSED, TASK_TIMEOUT};
 use tonic::Request;
 
 use crate::prover_node::{NodeStatus, ProverNode};
@@ -25,6 +23,7 @@ enum TaskType {
     Prove,
     Agg,
     Snark,
+    SingleNode,
 }
 
 fn get_nodes(task_type: TaskType) -> Vec<ProverNode> {
@@ -491,6 +490,65 @@ pub async fn snark_proof(
     }
     // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     Some(snark_task)
+}
+
+pub async fn single_node(mut single_node_task: SingleNodeTask, tls_config: Option<TlsConfig>) -> Option<SingleNodeTask> {
+    single_node_task.state = TASK_STATE_UNPROCESSED;
+    let client = get_idle_client(tls_config, TaskType::SingleNode).await;
+    if let Some((addrs, mut client, node_status)) = client {
+        let request = SingleNodeRequest {
+            proof_id: single_node_task.proof_id.clone(),
+            computed_request_id: single_node_task.task_id.clone(),
+            elf_path: single_node_task.elf_path.clone(),
+            base_dir: single_node_task.base_dir.clone(),
+            public_input_path: single_node_task.public_input_path.clone(),
+            private_input_path: single_node_task.private_input_path.clone(),
+            args: single_node_task.args.clone(),
+            block_no: single_node_task.block_no,
+            receipt_inputs_path: single_node_task.receipt_inputs_path.clone(),
+            program_id: single_node_task.program_id.clone(),
+        };
+        tracing::info!(
+            "[single node] rpc {} {}:{} start",
+            addrs,
+            request.proof_id,
+            request.computed_request_id
+        );
+        let now = std::time::Instant::now();
+        let mut grpc_request = Request::new(request);
+        grpc_request.set_timeout(Duration::from_secs(TASK_TIMEOUT));
+        let response = client.single_node(grpc_request).await;
+        let mut status = node_status.lock().unwrap();
+        if let Ok(response) = response {
+            *status = NodeStatus::Idle;
+            if let Some(response_result) = response.get_ref().result.as_ref() {
+                single_node_task.state = result_code_to_state(response_result.code);
+                // FIXME: node_info usage?
+                single_node_task.trace.node_info = addrs.clone();
+                single_node_task.output = response.get_ref().agg_receipt.clone();
+                
+                tracing::info!(
+                    "[single node] rpc {} {}:{} code:{:?} message:{:?} end. Elapsed {:?}",
+                    addrs,
+                    response.get_ref().proof_id,
+                    response.get_ref().computed_request_id,
+                    response_result.code,
+                    response_result.message,
+                    now.elapsed(),
+                );
+                return Some(single_node_task);
+            }
+        } else {
+            *status = NodeStatus::OffLine(get_timestamp());
+            tracing::warn!(
+                "Node {} is unreachable, marked Offline to avoid reuse",
+                addrs
+            );
+        }
+    }
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    Some(single_node_task)
+    
 }
 
 #[allow(dead_code)]

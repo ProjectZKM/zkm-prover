@@ -46,7 +46,7 @@ impl SnarkProver {
 
         let network_prove = NetworkProve::default();
         let gnark_proof = self.prove_groth16(reduced_proof, network_prove.opts)?;
-
+        tracing::info!("snark proof done");
         Ok((true, serde_json::to_vec(&gnark_proof)?))
     }
 

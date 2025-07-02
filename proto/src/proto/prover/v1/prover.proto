@@ -30,6 +30,7 @@ service ProverService {
   rpc Prove(ProveRequest) returns (ProveResponse) {}
   rpc Aggregate(AggregateRequest) returns (AggregateResponse) {}
   rpc SnarkProof(SnarkProofRequest) returns (SnarkProofResponse) {}
+  rpc SingleNode(SingleNodeRequest) returns (SingleNodeResponse) {}
 }
 
 message GetStatusRequest {}
@@ -141,5 +142,25 @@ message SnarkProofResponse {
   string proof_id = 1;
   string computed_request_id = 2;
   bytes snark_proof_with_public_inputs = 3;
+  Result result = 4;
+}
+
+message SingleNodeRequest {
+  string proof_id = 1;
+  string computed_request_id = 2;
+  string base_dir = 3;
+  string elf_path = 4;
+  optional uint64 block_no = 5;
+  string args = 6;
+  string public_input_path = 7;
+  string private_input_path = 8;
+  string receipt_inputs_path = 9;
+  string program_id = 10;
+}
+
+message SingleNodeResponse {
+  string proof_id = 1;
+  string computed_request_id = 2;
+  bytes agg_receipt = 3;
   Result result = 4;
 }

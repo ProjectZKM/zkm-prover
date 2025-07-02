@@ -1,7 +1,8 @@
 use crate::agg_prover::AggProver;
-use crate::contexts::{AggContext, ProveContext, SnarkContext, SplitContext};
+use crate::contexts::{AggContext, ProveContext, SingleNodeContext, SnarkContext, SplitContext};
 use crate::executor::Executor;
 use crate::root_prover::RootProver;
+use crate::single_node_prover::SingleNodeProver;
 use crate::snark_prover::SnarkProver;
 
 #[derive(Default)]
@@ -57,5 +58,15 @@ impl Pipeline {
             tracing::error!("prove_snark error {:#?}", e);
             e.to_string()
         })
+    }
+
+    pub fn prove_single_node(&self, single_node_context: &SingleNodeContext) -> Result<(bool, Vec<u8>), String> {
+        self.single_node_prover
+            .prove(single_node_context)
+            .map(|output| (true, output))
+            .map_err(|e| {
+                tracing::error!("prove_single_node error {:#?}", e);
+                e.to_string()
+            })
     }
 }
