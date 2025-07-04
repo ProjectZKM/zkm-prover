@@ -4,6 +4,7 @@ use common::file;
 use zkm_core_executor::ZKMReduceProof;
 use zkm_core_machine::io::ZKMStdin;
 use zkm_prover::{ZKMProvingKey, ZKMVerifyingKey};
+use zkm_sdk::network::prover::stage_service::Step;
 use zkm_stark::koala_bear_poseidon2::KoalaBearPoseidon2;
 use zkm_stark::StarkVerifyingKey;
 
@@ -54,12 +55,12 @@ impl SingleNodeProver {
             elf,
             vk: zkm_vk,
         };
-        let proof = match ctx.target_step {
-            3 => {
+        let proof = match Step::from_i32(ctx.target_step) {
+            Some(Step::InAgg) => {
                 tracing::info!("Singe node: generate Compressed proof");
                 client.prove(&zkm_pk, stdin).compressed().run()?
             }
-            5 => {
+            Some(Step::InSnark) => {
                 tracing::info!("Singe node: generate Snark proof");
                 client.prove(&zkm_pk, stdin).groth16().run()?
             }
