@@ -21,7 +21,7 @@ impl Pipeline {
             root_prover: RootProver::default(),
             agg_prover: AggProver::default(),
             snark_prover: SnarkProver::new(keys_input_dir),
-            single_node_prover: SingleNodeProver::default(),
+            single_node_prover: SingleNodeProver::new(keys_input_dir),
         }
     }
 

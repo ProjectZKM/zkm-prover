@@ -15,4 +15,5 @@ pub struct SingleNodeTask {
     pub target_step: Step,
     pub trace: Trace,
     pub output: Vec<u8>, // receipt: (reduced proof, vk) or snark proof
+    pub seg_size: u32,
 }

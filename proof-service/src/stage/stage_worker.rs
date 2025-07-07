@@ -68,28 +68,27 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                         tracing::debug!("single node task, but it has already been processed");
                         return;
                     }
-                    stage.step = Step::Prove;
-                    // update status in the db in order to help client get status response
-                    db.update_stage_task_check_at(
-                        &task.id,
-                        task.check_at as u64,
-                        check_at,
-                        stage.step.into(),
-                    )
-                    .await
-                    .unwrap();
-
                     // get single_node task
                     let single_node_task = stage.get_single_node_task();
                     let tls_config = tls_config.clone();
-                    let response = prover_client::single_node(single_node_task, tls_config).await;
+                    let response = prover_client::single_node(
+                        single_node_task,
+                        tls_config,
+                        db.clone(),
+                        &task.id,
+                        task.check_at as u64,
+                        check_at,
+                    )
+                    .await;
                     let mut result = vec![];
-                    if let Some(single_node_task) = response {
+                    if let Ok(single_node_task) = response {
                         // handle the response
                         stage.on_single_node_task(&single_node_task);
                         if stage.generate_task.target_step == Step::Snark {
                             result = single_node_task.output;
                         }
+                    } else {
+                        stage.is_error = true;
                     }
                     if stage.is_error() {
                         tracing::debug!("error in single node task");

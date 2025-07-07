@@ -642,6 +642,7 @@ impl Stage {
             private_input_path: self.generate_task.private_input_path.clone(),
             receipt_inputs_path: self.generate_task.receipt_inputs_path.clone(),
             target_step: self.generate_task.target_step,
+            seg_size: self.generate_task.seg_size,
             ..Default::default()
         }
     }

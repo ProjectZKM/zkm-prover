@@ -154,11 +154,12 @@ message SingleNodeRequest {
   string receipt_inputs_path = 6;
   string program_id = 7;
   includes.v1.Step target_step = 8;
+  uint32 seg_size = 9;
 }
 
 message SingleNodeResponse {
   string proof_id = 1;
   string computed_request_id = 2;
-  bytes agg_receipt = 3;
+  bytes output = 3;
   Result result = 4;
 }

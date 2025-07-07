@@ -18,7 +18,7 @@ use prover::{
 };
 #[cfg(feature = "prover_v2")]
 use prover_v2::{
-    contexts::{AggContext, ProveContext, SnarkContext, SplitContext, SingleNodeContext},
+    contexts::{AggContext, ProveContext, SingleNodeContext, SnarkContext, SplitContext},
     pipeline::Pipeline,
 };
 
@@ -374,6 +374,7 @@ impl ProverService for ProverServiceSVC {
                 private_input_path: request.get_ref().private_input_path.to_string(),
                 receipt_inputs_path: request.get_ref().receipt_inputs_path.to_string(),
                 target_step: request.get_ref().target_step,
+                seg_size: request.get_ref().seg_size,
             };
 
             let pipeline = self.pipeline.clone();
@@ -383,7 +384,7 @@ impl ProverService for ProverServiceSVC {
             let mut response = SingleNodeResponse {
                 proof_id: request.get_ref().proof_id.clone(),
                 computed_request_id: request.get_ref().computed_request_id.clone(),
-                agg_receipt: match &result {
+                output: match &result {
                     Ok((_, x)) => x.clone(),
                     _ => vec![],
                 },
@@ -409,6 +410,8 @@ impl ProverService for ProverServiceSVC {
         &self,
         _request: Request<SingleNodeRequest>,
     ) -> tonic::Result<Response<SingleNodeResponse>, Status> {
-        Err(Status::unimplemented("single_node is not supported in zkm feature"))
+        Err(Status::unimplemented(
+            "single_node is not supported in zkm feature",
+        ))
     }
 }

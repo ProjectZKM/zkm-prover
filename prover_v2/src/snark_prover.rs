@@ -43,11 +43,9 @@ impl SnarkProver {
                 _ => unreachable!("unexpected proof"),
             }
         };
-
-
         let network_prove = NetworkProve::default();
         let gnark_proof = self.prove_groth16(reduced_proof, network_prove.opts)?;
-        tracing::info!("snark proof done");
+        // tracing::info!("snark proof done");
         Ok((true, serde_json::to_vec(&gnark_proof)?))
     }
 
@@ -59,15 +57,13 @@ impl SnarkProver {
         let prover = get_prover();
         let compress_proof = prover.shrink(reduced_proof, opts)?;
         let outer_proof = self.wrap_bn254(&prover, compress_proof, opts)?;
-
         let groth16_bn254_artifacts = PathBuf::from(&self.proving_key_paths);
         let proof = prover.wrap_groth16_bn254(outer_proof, &groth16_bn254_artifacts);
-
         Ok(ZKMProof::Groth16(proof))
     }
 
     #[instrument(name = "wrap_bn254", level = "info", skip_all)]
-    fn wrap_bn254(
+    pub fn wrap_bn254(
         &self,
         prover: &ZKMProver,
         compressed_proof: ZKMReduceProof<InnerSC>,
