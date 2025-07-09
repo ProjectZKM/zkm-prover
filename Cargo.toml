@@ -8,13 +8,15 @@ members = [
 
 resolver = "2"
 
-#[patch."https://github.com/zkMIPS/zkm.git"]
-#zkm-prover = { path = "../zkm/prover" }
-#zkm-emulator = { path = "../zkm/emulator" }
-#zkm-recursion = { path = "../zkm/recursion" }
-#
-#[patch."https://github.com/zkMIPS/plonky2.git"]
-#plonky2 = { path = "../plonky2-origin/plonky2" }
-#starky = { path = "../plonky2-origin/starky" }
-#plonky2_util = { path = "../plonky2-origin/util" }
-#plonky2_maybe_rayon = { path = "../plonky2-origin/maybe_rayon" }
+[patch."https://github.com/zkMIPS/plonky2.git"]
+plonky2 = { git = "https://github.com/ProjectZKM/plonky2.git", branch = "zkm_dev" }
+plonky2_field = { git = "https://github.com/ProjectZKM/plonky2.git", branch = "zkm_dev" }
+plonky2_util = { git = "https://github.com/ProjectZKM/plonky2.git", branch = "zkm_dev" }
+plonky2_maybe_rayon = { git = "https://github.com/ProjectZKM/plonky2.git", branch = "zkm_dev" }
+
+[patch."https://github.com/zkMIPS/succinctx.git"]
+plonky2x = { git = "https://github.com/ProjectZKM/succinctx.git", branch = "zkm" }
+plonky2x-derive = { git = "https://github.com/ProjectZKM/succinctx.git", branch = "zkm" }
+
+[patch."https://github.com/zkMIPS/curta.git"]
+curta = { git = "https://github.com/ProjectZKM/curta.git", branch = "zkm" }

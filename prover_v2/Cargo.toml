@@ -13,16 +13,16 @@ once_cell = "1.13.0"
 zstd = "0.13.3"
 lru = "0.14.0"
 
-zkm-core-machine = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-core-executor = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-stark = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-prover = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-recursion-compiler = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-recursion-core = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-recursion-circuit = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-sdk = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
+zkm-core-machine = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
+zkm-core-executor = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
+zkm-stark = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
+zkm-prover = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
+zkm-recursion-compiler = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
+zkm-recursion-core = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
+zkm-recursion-circuit = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
+zkm-sdk = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
 
-p3-maybe-rayon = { git = "https://github.com/zkMIPS/Plonky3" }
+p3-maybe-rayon = { git = "https://github.com/ProjectZKM/Plonky3" }
 
 common = { path = "../common" }
 tempfile = "3.18.0"

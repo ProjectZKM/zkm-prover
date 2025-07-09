@@ -9,7 +9,7 @@ edition = "2021"
 prover = { path = "../prover", optional = true }
 prover_v2 = { path = "../prover_v2", optional = true }
 
-plonky2 = { git = "https://github.com/zkMIPS/plonky2.git", branch = "zkm_dev", optional = true }
+plonky2 = { git = "https://github.com/ProjectZKM/plonky2.git", branch = "zkm_dev", optional = true }
 
 common = { path = "../common" }
 

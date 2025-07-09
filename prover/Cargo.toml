@@ -6,11 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-plonky2 = { git = "https://github.com/zkMIPS/plonky2.git", branch = "zkm_dev" }
+plonky2 = { git = "https://github.com/ProjectZKM/plonky2.git", branch = "zkm_dev" }
 
-zkm-prover = { git = "https://github.com/zkMIPS/zkm.git", branch = "main" }
-zkm-emulator = { git = "https://github.com/zkMIPS/zkm.git", branch = "main" }
-zkm-recursion = { git = "https://github.com/zkMIPS/zkm.git", branch = "main" }
+zkm-prover = { git = "https://github.com/ProjectZKM/zkm.git", branch = "main" }
+zkm-emulator = { git = "https://github.com/ProjectZKM/zkm.git", branch = "main" }
+zkm-recursion = { git = "https://github.com/ProjectZKM/zkm.git", branch = "main" }
 
 #zkm-prover =    { path = "../../zkm/prover" }
 #zkm-emulator =  { path = "../../zkm/emulator" }

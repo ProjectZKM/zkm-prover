@@ -1,5 +1,5 @@
-# image: zkm-prover:latest => https://github.com/zkMIPS/zkm-prover/blob/main/Dockerfile
-# image: gnark-plonky2-verifier:latest => https://github.com/zkMIPS/gnark-plonky2-verifier/blob/main/Dockerfile
+# image: zkm-prover:latest => https://github.com/ProjectZKM/zkm-prover/blob/main/Dockerfile
+# image: gnark-plonky2-verifier:latest => https://github.com/ProjectZKM/gnark-plonky2-verifier/blob/main/Dockerfile
 networks:
   default:
     name: zkm-prover
@@ -10,7 +10,7 @@ services:
     depends_on:
       zkm-prover:
         condition: service_started
-    image: zkmips/zkm-prover:latest
+    image: projectzkm/zkm-prover:latest
     ports:
       - 50000:50000
     environment:
@@ -26,7 +26,7 @@ services:
   zkm-prover:
     container_name: zkm-prover
     restart: unless-stopped
-    image: zkmips/zkm-prover:latest
+    image: projectzkm/zkm-prover:latest
     environment:
       - RUST_LOG=info
     volumes:
