@@ -106,7 +106,7 @@ impl RootProver {
         // Fix the shape of the record.
         let now = std::time::Instant::now();
         if let Some(shape_config) = &prover.core_shape_config {
-            shape_config.fix_shape(&mut record).unwrap();
+            shape_config.fix_shape(&mut record)?;
         }
         tracing::info!("fix shape time: {:?}", now.elapsed());
         let now = std::time::Instant::now();
