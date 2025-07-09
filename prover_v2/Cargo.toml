@@ -13,14 +13,14 @@ once_cell = "1.13.0"
 zstd = "0.13.3"
 lru = "0.14.0"
 
-zkm-core-machine = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
-zkm-core-executor = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
-zkm-stark = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
-zkm-prover = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
-zkm-recursion-compiler = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
-zkm-recursion-core = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
-zkm-recursion-circuit = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
-zkm-sdk = { git = "https://github.com/ProjectZKM/Ziren", branch = "feat/prover" }
+zkm-core-machine = { git = "https://github.com/ProjectZKM/Ziren", rev = "d429438" }
+zkm-core-executor = { git = "https://github.com/ProjectZKM/Ziren", rev = "d429438" }
+zkm-stark = { git = "https://github.com/ProjectZKM/Ziren", rev = "d429438" }
+zkm-prover = { git = "https://github.com/ProjectZKM/Ziren", rev = "d429438" }
+zkm-recursion-compiler = { git = "https://github.com/ProjectZKM/Ziren", rev = "d429438" }
+zkm-recursion-core = { git = "https://github.com/ProjectZKM/Ziren", rev = "d429438" }
+zkm-recursion-circuit = { git = "https://github.com/ProjectZKM/Ziren", rev = "d429438" }
+zkm-sdk = { git = "https://github.com/ProjectZKM/Ziren", rev = "d429438" }
 
 p3-maybe-rayon = { git = "https://github.com/ProjectZKM/Plonky3" }
 
