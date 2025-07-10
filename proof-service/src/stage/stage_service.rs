@@ -284,14 +284,86 @@ impl StageService for StageServiceSVC {
             let target_step = Step::from_i32(target_step).unwrap();
 
             let base_dir = self.config.base_dir.clone();
+
+            // check elf_data or elf_id
+            // If elf_data is empty, and from_step is Init, elf_id should exist.
+            let (elf_path, elf_id) = {
+                if from_step == Step::Init {
+                    let elf_dir = format!("{}/elf", base_dir);
+                    if request.get_ref().elf_data.is_empty() {
+                        // check if elf_id exists
+                        if request.get_ref().elf_id.is_none() {
+                            let response = GenerateProofResponse {
+                                proof_id: request.get_ref().proof_id.clone(),
+                                status: InvalidParameter.into(),
+                                error_message: "elf_data or elf_id should not be empty".to_string(),
+                                ..Default::default()
+                            };
+                            tracing::warn!(
+                                "[generate_proof] {} elf_data or elf_id should not be empty",
+                                request.get_ref().proof_id,
+                            );
+                            return Ok(Response::new(response));
+                        } else {
+                            let elf_id = request.get_ref().elf_id.clone().unwrap();
+                            // remove "0x" if exists
+                            let elf_id = elf_id.strip_prefix("0x").unwrap_or(&elf_id);
+                            let elf_path = format!("{}/{}", elf_dir, elf_id);
+                            if !std::path::Path::new(&elf_path).exists() {
+                                let response = GenerateProofResponse {
+                                    proof_id: request.get_ref().proof_id.clone(),
+                                    status: InvalidParameter.into(),
+                                    error_message: "elf_id not found".to_string(),
+                                    ..Default::default()
+                                };
+                                tracing::warn!(
+                                    "[generate_proof] {} elf_id not found",
+                                    request.get_ref().proof_id,
+                                );
+                                return Ok(Response::new(response));
+                            }
+                            tracing::info!(
+                                "[generate_proof] {} elf_id found cache: {}",
+                                request.get_ref().proof_id,
+                                elf_id
+                            );
+                            (elf_path, elf_id.to_string())
+                        }
+                    } else {
+                        // compute elf_id
+                        let mut hasher = Sha256::new();
+                        hasher.update(&request.get_ref().elf_data);
+                        let elf_hash = hasher.finalize();
+                        let elf_id = hex::encode(elf_hash);
+
+                        let elf_path = format!("{}/{}", elf_dir, elf_id);
+                        if !std::path::Path::new(&elf_path).exists() {
+                            tracing::info!(
+                                "[generate_proof] {} elf_id not found, write to cache: {}",
+                                request.get_ref().proof_id,
+                                elf_id
+                            );
+                            file::new(&elf_path)
+                                .write(&request.get_ref().elf_data)
+                                .map_err(|e| Status::internal(e.to_string()))?;
+                        } else {
+                            tracing::info!(
+                                "[generate_proof] {} elf_id found cache but provided: {}",
+                                request.get_ref().proof_id,
+                                elf_id
+                            );
+                        }
+
+                        (elf_path, elf_id)
+                    }
+                } else {
+                    (String::new(), String::new())
+                }
+            };
+
             let dir_path = format!("{}/proof/{}", base_dir, request.get_ref().proof_id);
             file::new(&dir_path)
                 .create_dir_all()
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            let elf_path = format!("{}/elf", dir_path);
-            file::new(&elf_path)
-                .write(&request.get_ref().elf_data)
                 .map_err(|e| Status::internal(e.to_string()))?;
 
             let block_no = request.get_ref().block_no.unwrap_or(0u64);
@@ -431,13 +503,10 @@ impl StageService for StageServiceSVC {
             } else {
                 return Err(Status::internal("ProverVersion error"));
             };
-            // compute program id
-            let mut hasher = Sha256::new();
-            hasher.update(&request.get_ref().elf_data);
-            let elf_hash = hasher.finalize();
+
             let generate_task = GenerateTask::new(
                 prover_version,
-                hex::encode(elf_hash),
+                elf_id,
                 &request.get_ref().proof_id,
                 &dir_path,
                 &elf_path,
