@@ -419,7 +419,10 @@ impl StageService for StageServiceSVC {
                     return Ok(Response::new(response));
                 }
             }
-
+            let mut max_prover_num = request.get_ref().max_prover_num;
+            if max_prover_num == 0 || max_prover_num > self.config.prover_addrs.len() as u32 {
+                max_prover_num = self.config.prover_addrs.len() as u32;
+            }
             let receipt_inputs_path = if request.get_ref().receipt_inputs.is_empty() {
                 "".to_string()
             } else {
@@ -519,6 +522,7 @@ impl StageService for StageServiceSVC {
                 &output_stream_path,
                 Some(block_no),
                 request.get_ref().seg_size,
+                max_prover_num,
                 from_step,
                 target_step,
                 request.get_ref().composite_proof,

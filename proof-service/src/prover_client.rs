@@ -100,10 +100,39 @@ pub fn result_code_to_state(code: i32) -> u32 {
     }
 }
 
-pub async fn split(mut split_task: SplitTask, tls_config: Option<TlsConfig>) -> Option<SplitTask> {
+pub async fn split(
+    mut split_task: SplitTask,
+    tls_config: Option<TlsConfig>,
+    cur_prover_num: Arc<tokio::sync::Mutex<u32>>,
+    max_prover_num: u32,
+) -> Option<SplitTask> {
     split_task.state = TASK_STATE_UNPROCESSED;
+    // check if the number of current prover nodes is less than max_prover_num
+    {
+        let count = cur_prover_num.lock().await;
+        if *count >= max_prover_num {
+            return Some(split_task);
+        }
+    }
     let client = get_idle_client(tls_config, TaskType::Split).await;
     if let Some((addrs, mut client, node_status)) = client {
+        {
+            // after getting an idle client, we can check the current prover number again
+            let mut count = cur_prover_num.lock().await;
+            tracing::debug!(
+                "[before]: current prover num: {}, max prover num: {}",
+                *count,
+                max_prover_num
+            );
+            if *count >= max_prover_num {
+                // cannot run more than max_prover_num nodes at the same time.
+                // set the node status to Idle, so it can be reused later
+                let mut status = node_status.lock().unwrap();
+                *status = NodeStatus::Idle;
+                return Some(split_task);
+            }
+            *count += 1;
+        }
         let request = SplitElfRequest {
             proof_id: split_task.proof_id.clone(),
             computed_request_id: split_task.task_id.clone(),
@@ -129,6 +158,16 @@ pub async fn split(mut split_task: SplitTask, tls_config: Option<TlsConfig>) -> 
         let mut grpc_request = Request::new(request);
         grpc_request.set_timeout(Duration::from_secs(TASK_TIMEOUT));
         let response = client.split_elf(grpc_request).await;
+        {
+            // Decrease the current prover number.
+            let mut count = cur_prover_num.lock().await;
+            tracing::debug!(
+                "[after]: current prover num: {}, max prover num: {}",
+                *count,
+                max_prover_num
+            );
+            *count -= 1;
+        }
         let mut status = node_status.lock().unwrap();
         if let Ok(response) = response {
             *status = NodeStatus::Idle;
@@ -163,10 +202,39 @@ pub async fn split(mut split_task: SplitTask, tls_config: Option<TlsConfig>) -> 
     Some(split_task)
 }
 
-pub async fn prove(mut prove_task: ProveTask, tls_config: Option<TlsConfig>) -> Option<ProveTask> {
+pub async fn prove(
+    mut prove_task: ProveTask,
+    tls_config: Option<TlsConfig>,
+    cur_prover_num: Arc<tokio::sync::Mutex<u32>>,
+    max_prover_num: u32,
+) -> Option<ProveTask> {
     prove_task.state = TASK_STATE_UNPROCESSED;
+    // check if the number of current prover nodes is less than max_prover_num
+    {
+        let count = cur_prover_num.lock().await;
+        if *count >= max_prover_num {
+            return Some(prove_task);
+        }
+    }
     let client = get_idle_client(tls_config, TaskType::Prove).await;
     if let Some((addrs, mut client, node_status)) = client {
+        {
+            // after getting an idle client, we can check the current prover number again
+            let mut count = cur_prover_num.lock().await;
+            tracing::debug!(
+                "[before]: current prover num: {}, max prover num: {}",
+                *count,
+                max_prover_num
+            );
+            if *count >= max_prover_num {
+                // cannot run more than max_prover_num nodes at the same time.
+                // set the node status to Idle, so it can be reused later
+                let mut status = node_status.lock().unwrap();
+                *status = NodeStatus::Idle;
+                return Some(prove_task);
+            }
+            *count += 1;
+        }
         if prove_task.trace.node_info == addrs {
             // If the task is already failed and the node is the same, skip it
             let mut status = node_status.lock().unwrap();
@@ -195,6 +263,16 @@ pub async fn prove(mut prove_task: ProveTask, tls_config: Option<TlsConfig>) -> 
         let mut grpc_request = Request::new(request);
         grpc_request.set_timeout(Duration::from_secs(TASK_TIMEOUT));
         let response = client.prove(grpc_request).await;
+        {
+            // Decrease the current prover number.
+            let mut count = cur_prover_num.lock().await;
+            tracing::debug!(
+                "[after]: current prover num: {}, max prover num: {}",
+                *count,
+                max_prover_num
+            );
+            *count -= 1;
+        }
         let mut status = node_status.lock().unwrap();
         if let Ok(response) = response {
             *status = NodeStatus::Idle;
@@ -226,10 +304,39 @@ pub async fn prove(mut prove_task: ProveTask, tls_config: Option<TlsConfig>) -> 
     Some(prove_task)
 }
 
-pub async fn aggregate(mut agg_task: AggTask, tls_config: Option<TlsConfig>) -> Option<AggTask> {
+pub async fn aggregate(
+    mut agg_task: AggTask,
+    tls_config: Option<TlsConfig>,
+    cur_prover_num: Arc<tokio::sync::Mutex<u32>>,
+    max_prover_num: u32,
+) -> Option<AggTask> {
     agg_task.state = TASK_STATE_UNPROCESSED;
+    // check if the number of current prover nodes is less than max_prover_num
+    {
+        let count = cur_prover_num.lock().await;
+        if *count >= max_prover_num {
+            return Some(agg_task);
+        }
+    }
     let client = get_idle_client(tls_config, TaskType::Agg).await;
     if let Some((addrs, mut client, node_status)) = client {
+        {
+            // after getting an idle client, we can check the current prover number again
+            let mut count = cur_prover_num.lock().await;
+            tracing::debug!(
+                "[before]: current prover num: {}, max prover num: {}",
+                *count,
+                max_prover_num
+            );
+            if *count >= max_prover_num {
+                // cannot run more than max_prover_num nodes at the same time.
+                // set the node status to Idle, so it can be reused later
+                let mut status = node_status.lock().unwrap();
+                *status = NodeStatus::Idle;
+                return Some(agg_task);
+            }
+            *count += 1;
+        }
         let request = AggregateRequest {
             proof_id: agg_task.proof_id.clone(),
             computed_request_id: agg_task.task_id.clone(),
@@ -254,6 +361,16 @@ pub async fn aggregate(mut agg_task: AggTask, tls_config: Option<TlsConfig>) -> 
         let mut grpc_request = Request::new(request);
         grpc_request.set_timeout(Duration::from_secs(TASK_TIMEOUT));
         let response = client.aggregate(grpc_request).await;
+        {
+            // Decrease the current prover number.
+            let mut count = cur_prover_num.lock().await;
+            tracing::debug!(
+                "[after]: current prover num: {}, max prover num: {}",
+                *count,
+                max_prover_num
+            );
+            *count -= 1;
+        }
         let mut status = node_status.lock().unwrap();
         if let Ok(response) = response {
             *status = NodeStatus::Idle;
@@ -287,9 +404,35 @@ pub async fn aggregate(mut agg_task: AggTask, tls_config: Option<TlsConfig>) -> 
 pub async fn snark_proof(
     mut snark_task: SnarkTask,
     tls_config: Option<TlsConfig>,
+    cur_prover_num: Arc<tokio::sync::Mutex<u32>>,
+    max_prover_num: u32,
 ) -> Option<SnarkTask> {
+    // check if the number of current prover nodes is less than max_prover_num
+    {
+        let count = cur_prover_num.lock().await;
+        if *count >= max_prover_num {
+            return Some(snark_task);
+        }
+    }
     let client = get_idle_client(tls_config, TaskType::Snark).await;
     if let Some((addrs, mut client, node_status)) = client {
+        {
+            // after getting an idle client, we can check the current prover number again
+            let mut count = cur_prover_num.lock().await;
+            tracing::debug!(
+                "[before]: current prover num: {}, max prover num: {}",
+                *count,
+                max_prover_num
+            );
+            if *count >= max_prover_num {
+                // cannot run more than max_prover_num nodes at the same time.
+                // set the node status to Idle, so it can be reused later
+                let mut status = node_status.lock().unwrap();
+                *status = NodeStatus::Idle;
+                return Some(snark_task);
+            }
+            *count += 1;
+        }
         let request = SnarkProofRequest {
             version: snark_task.version,
             proof_id: snark_task.proof_id.clone(),
@@ -306,6 +449,16 @@ pub async fn snark_proof(
         let mut grpc_request = Request::new(request);
         grpc_request.set_timeout(Duration::from_secs(TASK_TIMEOUT));
         let response = client.snark_proof(grpc_request).await;
+        {
+            // Decrease the current prover number.
+            let mut count = cur_prover_num.lock().await;
+            tracing::debug!(
+                "[after]: current prover num: {}, max prover num: {}",
+                *count,
+                max_prover_num
+            );
+            *count -= 1;
+        }
         let mut status = node_status.lock().unwrap();
         if let Ok(response) = response {
             *status = NodeStatus::Idle;

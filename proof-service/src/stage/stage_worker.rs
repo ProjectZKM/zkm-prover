@@ -61,6 +61,8 @@ async fn run_stage_task(
                 let (tx, mut rx) = tokio::sync::mpsc::channel(128);
                 stage.dispatch();
                 let mut interval = time::interval(time::Duration::from_millis(200));
+                let max_prover_num = stage.generate_task.max_prover_num;
+                let cur_prover_num = Arc::new(tokio::sync::Mutex::new(0u32));
                 loop {
                     let current_step = stage.step;
                     match stage.step {
@@ -69,9 +71,15 @@ async fn run_stage_task(
                             if let Some(split_task) = split_task {
                                 let tx = tx.clone();
                                 let tls_config = tls_config.clone();
+                                let cur_count = cur_prover_num.clone();
                                 tokio::spawn(async move {
-                                    let response =
-                                        prover_client::split(split_task, tls_config).await;
+                                    let response = prover_client::split(
+                                        split_task,
+                                        tls_config,
+                                        cur_count,
+                                        max_prover_num,
+                                    )
+                                    .await;
                                     if let Some(split_task) = response {
                                         let _ = tx.send(Task::Split(split_task)).await;
                                     }
@@ -82,9 +90,15 @@ async fn run_stage_task(
                                 if let Some(prove_task) = stage.get_prove_task() {
                                     let tx = tx.clone();
                                     let tls_config = tls_config.clone();
+                                    let cur_count = cur_prover_num.clone();
                                     tokio::spawn(async move {
-                                        let response =
-                                            prover_client::prove(prove_task, tls_config).await;
+                                        let response = prover_client::prove(
+                                            prove_task,
+                                            tls_config,
+                                            cur_count,
+                                            max_prover_num,
+                                        )
+                                        .await;
                                         if let Some(prove_task) = response {
                                             let _ = tx.send(Task::Prove(prove_task)).await;
                                         }
@@ -100,9 +114,15 @@ async fn run_stage_task(
                                 if let Some(agg_task) = agg_task {
                                     let tx = tx.clone();
                                     let tls_config = tls_config.clone();
+                                    let cur_count = cur_prover_num.clone();
                                     tokio::spawn(async move {
-                                        let response =
-                                            prover_client::aggregate(agg_task, tls_config).await;
+                                        let response = prover_client::aggregate(
+                                            agg_task,
+                                            tls_config,
+                                            cur_count,
+                                            max_prover_num,
+                                        )
+                                        .await;
                                         if let Some(agg_task) = response {
                                             let _ = tx.send(Task::Agg(agg_task)).await;
                                         }
@@ -115,9 +135,15 @@ async fn run_stage_task(
                             if let Some(snark_task) = snark_task {
                                 let tx = tx.clone();
                                 let tls_config = tls_config.clone();
+                                let cur_count = cur_prover_num.clone();
                                 tokio::spawn(async move {
-                                    let response =
-                                        prover_client::snark_proof(snark_task, tls_config).await;
+                                    let response = prover_client::snark_proof(
+                                        snark_task,
+                                        tls_config,
+                                        cur_count,
+                                        max_prover_num,
+                                    )
+                                    .await;
                                     if let Some(snark_task) = response {
                                         let _ = tx.send(Task::Snark(snark_task)).await;
                                     }
