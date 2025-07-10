@@ -1,13 +1,13 @@
 use clap::Parser;
 use common::tls::Config as TlsConfig;
 use std::net::SocketAddr;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
 use tonic::transport::ServerTlsConfig;
 
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response};
 use prometheus::{Encoder, TextEncoder};
-
 use proof_service::{
     config, metrics,
     proto::{
@@ -64,7 +64,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_server = if args.stage {
         let stage = StageServiceSVC::new(runtime_config.clone()).await?;
         server
-            .add_service(StageServiceServer::new(stage))
+            .add_service(
+                StageServiceServer::new(stage)
+                    .send_compressed(CompressionEncoding::Gzip)
+                    .accept_compressed(CompressionEncoding::Gzip),
+            )
             .serve(addr)
     } else {
         #[cfg(all(feature = "prover", feature = "gpu"))]
@@ -75,7 +79,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let prover = ProverServiceSVC::new(runtime_config.clone());
         server
-            .add_service(ProverServiceServer::new(prover))
+            .add_service(
+                ProverServiceServer::new(prover)
+                    .send_compressed(CompressionEncoding::Gzip)
+                    .accept_compressed(CompressionEncoding::Gzip),
+            )
             .serve(addr)
     };
 
