@@ -86,7 +86,7 @@ async fn run_stage_task(
                                 });
                             }
                             // This is a temporary workaround.
-                            if stage.count_processing_prove_tasks() < node_num {
+                            if stage.count_processing_prove_tasks() < max_prover_num as usize {
                                 if let Some(prove_task) = stage.get_prove_task() {
                                     let tx = tx.clone();
                                     let tls_config = tls_config.clone();
@@ -107,7 +107,7 @@ async fn run_stage_task(
                             }
 
                             if stage.is_tasks_gen_done
-                                && stage.count_unfinished_prove_tasks() < node_num
+                                && stage.count_unfinished_prove_tasks() < max_prover_num as usize
                             {
                                 let agg_task = stage.get_agg_task();
                                 tracing::debug!("get_agg_task: {:?}", agg_task.is_some());
