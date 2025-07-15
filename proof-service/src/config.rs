@@ -14,6 +14,7 @@ pub struct RuntimeConfig {
     pub prover_addrs: Vec<String>,
 
     pub base_dir: String,
+    pub max_concurrent_tasks: Option<usize>,
 
     pub fileserver_url: Option<String>,
     // pub fileserver_addr: String,
@@ -32,6 +33,7 @@ impl RuntimeConfig {
             database_url: "mysql://user:password@localhost:3306/dbname".to_string(),
             prover_addrs: ["0.0.0.0:50000".to_string()].to_vec(),
             base_dir: "/tmp".to_string(),
+            max_concurrent_tasks: Some(1),
             fileserver_url: None,
             // fileserver_addr: "0.0.0.0:40000".to_string(),
             proving_key_paths: vec![],

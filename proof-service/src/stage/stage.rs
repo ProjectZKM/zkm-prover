@@ -131,8 +131,7 @@ impl Stage {
                         self.gen_prove_task_post();
                         crate::metrics::SEGMENTS_GAUGE.set(self.prove_tasks.len() as f64);
                         tracing::info!(
-                            "proof_id {} done. Generate {} prove_tasks",
-                            self.generate_task.proof_id,
+                            "Split done. Generate {} prove_tasks",
                             self.prove_tasks.len()
                         );
                         if !self.generate_task.composite_proof {

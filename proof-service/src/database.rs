@@ -1,5 +1,7 @@
 use ethers::abi::ethereum_types;
 use serde_derive::{Deserialize, Serialize};
+use tracing::instrument;
+
 #[derive(Serialize, Deserialize, Debug, Clone, Default, sqlx::FromRow)]
 pub struct StageTask {
     pub id: String,
@@ -110,6 +112,7 @@ impl Database {
     }
 
     #[allow(dead_code)]
+    #[instrument(level = "info", skip_all, fields(Step = %step))]
     pub async fn update_stage_task_check_at(
         &self,
         proof_id: &str,
