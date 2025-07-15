@@ -548,11 +548,6 @@ impl StageService for StageServiceSVC {
                 ..Default::default()
             };
 
-            self.tx
-                .send(stage_task)
-                .await
-                .map_err(|e| Status::internal(format!("Failed to send task to queue: {}", e)))?;
-
             let _ = self
                 .db
                 .insert_stage_task(
@@ -565,6 +560,12 @@ impl StageService for StageServiceSVC {
                 .map_err(|e| {
                     Status::internal(format!("Failed to insert task into database: {}", e))
                 })?;
+
+            self.tx
+                .send(stage_task)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to send task to queue: {}", e)))?;
+
             // TODO: we use the stage server as the file server, any better way?
             let mut snark_proof_url = String::new();
             let mut stark_proof_url = String::new();

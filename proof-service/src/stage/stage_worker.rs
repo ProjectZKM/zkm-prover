@@ -58,6 +58,19 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                 let mut stage = Stage::new(generate_context.clone());
                 let (tx, mut rx) = mpsc::channel(128);
                 stage.dispatch();
+
+                // update db, record the latest status and step
+                let _ = db
+                    .update_stage_task_check_at(
+                        &task.id,
+                        task.check_at as u64,
+                        check_at,
+                        stage.step.into(),
+                    )
+                    .await?;
+                task.check_at = check_at as i64;
+                check_at = get_timestamp();
+
                 let mut interval = time::interval(time::Duration::from_millis(200));
                 let max_prover_num = stage.generate_task.max_prover_num;
                 let cur_prover_num = Arc::new(tokio::sync::Mutex::new(0u32));
