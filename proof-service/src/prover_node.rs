@@ -94,22 +94,6 @@ impl ProverNode {
             let client = ProverServiceClient::<Channel>::new(client);
 
             return Some(client);
-            // let request = GetStatusRequest {};
-            // let response = client.get_status(Request::new(request)).await;
-            // if let Ok(response) = response {
-            //     let status = response.get_ref().status;
-            //     tracing::info!("client {} status {}", self.addr, status);
-            //     if get_status_response::Status::from_i32(status)
-            //         == Some(get_status_response::Status::Idle)
-            //         || get_status_response::Status::from_i32(status)
-            //         == Some(get_status_response::Status::Unspecified)
-            //     {
-            //         return Some(client);
-            //     }
-            // } else {
-            //     tracing::info!("client {} status None", self.addr);
-            //     self.set_client(None);
-            // }
         }
         None
     }
