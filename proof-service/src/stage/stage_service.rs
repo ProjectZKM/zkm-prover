@@ -7,7 +7,7 @@ use anyhow::Error;
 use common::tls::Config as TlsConfig;
 use std::sync::Mutex;
 
-use crate::stage::{stage_worker, tasks, GenerateTask};
+use crate::stage::{tasks, GenerateTask};
 
 use tonic::{Request, Response, Status};
 
@@ -25,9 +25,12 @@ use std::str::FromStr;
 use crate::database;
 use crate::metrics;
 
+use crate::database::StageTask;
 use crate::proto::includes::v1::{ProverVersion, Step};
+use crate::stage::stage_worker::TaskManager;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 
 lazy_static! {
     static ref GLOBAL_TASKMAP: Mutex<HashMap<String, i32>> = Mutex::new(HashMap::new());
@@ -36,6 +39,7 @@ lazy_static! {
 pub struct StageServiceSVC {
     db: database::Database,
     config: config::RuntimeConfig,
+    tx: mpsc::Sender<StageTask>,
 }
 
 impl StageServiceSVC {
@@ -55,9 +59,13 @@ impl StageServiceSVC {
         let database_url = config.database_url.as_str();
         let db = database::Database::new(database_url);
         sqlx::migrate!("./migrations").run(&db.db_pool).await?;
-        let _ =
-            stage_worker::start(config.prover_addrs.len(), tls_config.clone(), db.clone()).await;
-        Ok(StageServiceSVC { db, config })
+
+        let (task_manager, tx) = TaskManager::new(db.clone(), config.max_concurrent_tasks);
+        let tx = task_manager.load_incomplete_tasks_from_db(tx).await?;
+
+        task_manager.start(tls_config);
+
+        Ok(StageServiceSVC { db, config, tx })
     }
 
     pub fn verify_signature(&self, request: &GenerateProofRequest) -> Result<String, Error> {
@@ -530,15 +538,34 @@ impl StageService for StageServiceSVC {
                 &receipts_path,
             );
 
+            let context = serde_json::to_string(&generate_task).map_err(|e| {
+                Status::internal(format!("Failed to serialize GenerateTask context: {}", e))
+            })?;
+            let stage_task = StageTask {
+                id: generate_task.proof_id.clone(),
+                status: Computing.into(),
+                context: Some(context.clone()),
+                ..Default::default()
+            };
+
             let _ = self
                 .db
                 .insert_stage_task(
                     &request.get_ref().proof_id,
                     &user_address,
                     Computing.into(),
-                    &serde_json::to_string(&generate_task).unwrap(),
+                    &context,
                 )
-                .await;
+                .await
+                .map_err(|e| {
+                    Status::internal(format!("Failed to insert task into database: {}", e))
+                })?;
+
+            self.tx
+                .send(stage_task)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to send task to queue: {}", e)))?;
+
             // TODO: we use the stage server as the file server, any better way?
             let mut snark_proof_url = String::new();
             let mut stark_proof_url = String::new();
