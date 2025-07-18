@@ -55,7 +55,7 @@ impl RootProver {
 
         let mut record = match segment {
             Segment::State(state) => {
-                let mut program_cache = PROGRAM_CACHE.lock().unwrap();
+                let mut program_cache = PROGRAM_CACHE.lock();
                 let program = if let Some(program) = program_cache.cache.get(&ctx.program_id) {
                     tracing::info!("load program from cache");
                     program
@@ -86,7 +86,7 @@ impl RootProver {
         };
 
         let now = std::time::Instant::now();
-        let mut cache = KEY_CACHE.lock().unwrap();
+        let mut cache = KEY_CACHE.lock();
         let pk = if let Some((pk, _)) = cache.cache.get(&ctx.program_id) {
             pk
         } else {
