@@ -106,10 +106,9 @@ impl AggProver {
             runtime.witness_stream = witness_stream.into();
             runtime
                 .run()
+                .map(|_| runtime.record)
                 .map_err(|e| ZKMRecursionProverError::RuntimeError(e.to_string()))
-                .unwrap();
-            runtime.record
-        });
+        })?;
 
         // Generate the dependencies.
         let mut records = vec![record];

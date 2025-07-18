@@ -138,7 +138,7 @@ impl StageService for StageServiceSVC {
                 if target_step != Step::Split && !composite_proof {
                     if let Some(result) = task.result {
                         response.proof_with_public_inputs = if target_step == Step::Agg {
-                            file::new(&proof_path).read().unwrap()
+                            file::new(&proof_path).read().unwrap_or_default()
                         } else {
                             result.into_bytes()
                         };
