@@ -5,7 +5,6 @@ use crate::proto::stage_service::v1::{
 };
 use anyhow::Error;
 use common::tls::Config as TlsConfig;
-use std::sync::Mutex;
 
 use crate::stage::{tasks, GenerateTask};
 
@@ -28,13 +27,7 @@ use crate::metrics;
 use crate::database::StageTask;
 use crate::proto::includes::v1::{ProverVersion, Step};
 use crate::stage::stage_worker::TaskManager;
-use lazy_static::lazy_static;
-use std::collections::HashMap;
 use tokio::sync::mpsc;
-
-lazy_static! {
-    static ref GLOBAL_TASKMAP: Mutex<HashMap<String, i32>> = Mutex::new(HashMap::new());
-}
 
 pub struct StageServiceSVC {
     db: database::Database,
