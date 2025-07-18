@@ -58,7 +58,7 @@ impl Executor {
             tracing::info!("Write {} receipts", receipts.len());
         }
 
-        let mut program_cache = PROGRAM_CACHE.lock().unwrap();
+        let mut program_cache = PROGRAM_CACHE.lock();
         let program = if let Some(program) = program_cache.cache.get(&ctx.program_id) {
             tracing::info!("load program from cache");
             program
@@ -73,7 +73,7 @@ impl Executor {
             program_cache.cache.get(&ctx.program_id).unwrap()
         };
 
-        let mut cache = KEY_CACHE.lock().unwrap();
+        let mut cache = KEY_CACHE.lock();
         let vk = if let Some((_, vk)) = cache.cache.get(&ctx.program_id) {
             tracing::info!("load vk from cache");
             vk

@@ -12,6 +12,7 @@ anyhow = "1.0.97"
 once_cell = "1.13.0"
 zstd = "0.13.3"
 lru = "0.14.0"
+parking_lot = "0.12"
 
 zkm-core-machine = { git = "https://github.com/ProjectZKM/Ziren", rev = "d429438" }
 zkm-core-executor = { git = "https://github.com/ProjectZKM/Ziren", rev = "d429438" }

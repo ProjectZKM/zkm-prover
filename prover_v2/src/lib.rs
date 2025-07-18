@@ -1,8 +1,8 @@
 use lru::LruCache;
 use once_cell::sync::OnceCell;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
 use std::time::Duration;
 use zkm_core_executor::{ExecutionRecord, ExecutionState, Program, ZKMContextBuilder};
 use zkm_core_machine::io::ZKMStdin;
@@ -69,9 +69,7 @@ fn prover_instance() -> &'static Mutex<ZKMProver> {
 }
 
 pub fn get_prover() -> impl std::ops::DerefMut<Target = ZKMProver> {
-    prover_instance()
-        .lock()
-        .expect("GLOBAL_PROVER lock poisoned")
+    prover_instance().lock()
 }
 
 static WRAP_KEYS: OnceCell<(StarkProvingKey<OuterSC>, StarkVerifyingKey<OuterSC>)> =

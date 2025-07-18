@@ -67,7 +67,7 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                         check_at,
                         stage.step.into(),
                     )
-                    .await?;
+                    .await;
                 task.check_at = check_at as i64;
                 check_at = get_timestamp();
 
