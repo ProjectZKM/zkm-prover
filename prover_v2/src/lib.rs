@@ -3,6 +3,7 @@ use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use zkm_core_executor::{ExecutionRecord, ExecutionState, Program, ZKMContextBuilder};
 use zkm_core_machine::io::ZKMStdin;
@@ -63,19 +64,18 @@ pub enum Segment {
     Record(Box<ExecutionRecord>),
 }
 
-static GLOBAL_PROVER: OnceCell<Mutex<ZKMProver>> = OnceCell::new();
-fn prover_instance() -> &'static Mutex<ZKMProver> {
-    GLOBAL_PROVER.get_or_init(|| Mutex::new(ZKMProver::new()))
-}
+static GLOBAL_PROVER: OnceLock<Arc<ZKMProver>> = OnceLock::new();
 
-pub fn get_prover() -> impl std::ops::DerefMut<Target = ZKMProver> {
-    prover_instance().lock()
+pub fn get_prover() -> Arc<ZKMProver> {
+    GLOBAL_PROVER
+        .get_or_init(|| Arc::new(ZKMProver::new()))
+        .clone()
 }
 
 static WRAP_KEYS: OnceCell<(StarkProvingKey<OuterSC>, StarkVerifyingKey<OuterSC>)> =
     OnceCell::new();
 
-const DEFAULT_CACHE_SIZE: usize = 3;
+const DEFAULT_CACHE_SIZE: usize = 5;
 
 pub struct StarkKeyCache {
     pub cache: LruCache<String, (StarkProvingKey<CoreSC>, StarkVerifyingKey<CoreSC>)>,
