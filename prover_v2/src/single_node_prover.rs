@@ -50,7 +50,7 @@ impl SingleNodeProver {
             tracing::info!("Write {} receipts", receipts.len());
         }
         // get program from cache or generate new ones
-        let mut program_cache = PROGRAM_CACHE.lock().unwrap();
+        let mut program_cache = PROGRAM_CACHE.lock();
         let program = if let Some(program) = program_cache.cache.get(&ctx.program_id) {
             tracing::info!("load program from cache");
             program
@@ -63,7 +63,7 @@ impl SingleNodeProver {
             program_cache.cache.get(&ctx.program_id).unwrap()
         };
         // get keys from cache or generate new ones
-        let mut cache = KEY_CACHE.lock().unwrap();
+        let mut cache = KEY_CACHE.lock();
         let (pk, vk) = if let Some((pk, vk)) = cache.cache.get(&ctx.program_id) {
             tracing::info!("load vk from cache");
             (pk, vk)

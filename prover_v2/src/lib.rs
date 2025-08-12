@@ -11,7 +11,6 @@ use zkm_prover::{CoreSC, OuterSC, ZKMProver};
 use zkm_stark::{PublicValues, StarkProvingKey, StarkVerifyingKey, ZKMProverOpts};
 
 pub use zkm_sdk;
-use zkm_sdk::ProverClient;
 
 pub mod agg_prover;
 pub mod contexts;
