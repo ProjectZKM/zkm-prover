@@ -1,7 +1,8 @@
 use crate::agg_prover::AggProver;
-use crate::contexts::{AggContext, ProveContext, SnarkContext, SplitContext};
+use crate::contexts::{AggContext, ProveContext, SingleNodeContext, SnarkContext, SplitContext};
 use crate::executor::Executor;
 use crate::root_prover::RootProver;
+use crate::single_node_prover::SingleNodeProver;
 use crate::snark_prover::SnarkProver;
 
 #[derive(Default)]
@@ -10,6 +11,7 @@ pub struct Pipeline {
     root_prover: RootProver,
     agg_prover: AggProver,
     snark_prover: SnarkProver,
+    single_node_prover: SingleNodeProver,
 }
 
 impl Pipeline {
@@ -19,6 +21,7 @@ impl Pipeline {
             root_prover: RootProver::default(),
             agg_prover: AggProver::default(),
             snark_prover: SnarkProver::new(keys_input_dir),
+            single_node_prover: SingleNodeProver::new(keys_input_dir),
         }
     }
 
@@ -57,5 +60,15 @@ impl Pipeline {
             tracing::error!("prove_snark error {:#?}", e);
             e.to_string()
         })
+    }
+
+    pub fn prove_single_node(&self, single_node_context: &SingleNodeContext) -> Result<(bool, Vec<u8>), String> {
+        self.single_node_prover
+            .prove(single_node_context)
+            .map(|output| (true, output))
+            .map_err(|e| {
+                tracing::error!("prove_single_node error {:#?}", e);
+                e.to_string()
+            })
     }
 }

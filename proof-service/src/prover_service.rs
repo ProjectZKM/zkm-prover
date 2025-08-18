@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tonic::{Request, Response, Status};
 
@@ -7,6 +7,7 @@ use crate::proto::prover_service::v1::{
     prover_service_server::ProverService, AggregateRequest, AggregateResponse, GetStatusRequest,
     GetStatusResponse, GetTaskResultRequest, GetTaskResultResponse, ProveRequest, ProveResponse,
     Result, ResultCode, SnarkProofRequest, SnarkProofResponse, SplitElfRequest, SplitElfResponse,
+    get_status_response, SingleNodeRequest, SingleNodeResponse,
 };
 use crate::{config, metrics};
 #[cfg(feature = "prover")]
@@ -17,7 +18,7 @@ use prover::{
 };
 #[cfg(feature = "prover_v2")]
 use prover_v2::{
-    contexts::{AggContext, ProveContext, SnarkContext, SplitContext},
+    contexts::{AggContext, ProveContext, SingleNodeContext, SnarkContext, SplitContext},
     pipeline::Pipeline,
 };
 
@@ -352,5 +353,65 @@ impl ProverService for ProverServiceSVC {
             Ok(Response::new(response))
         })
         .await
+    }
+
+    #[cfg(feature = "prover_v2")]
+    async fn single_node(
+        &self,
+        request: Request<SingleNodeRequest>,
+    ) -> tonic::Result<Response<SingleNodeResponse>, Status> {
+        metrics::record_metrics("prover::single_node", || async {
+            tracing::info!(
+                "[single_node] {}:{} start",
+                request.get_ref().proof_id,
+                request.get_ref().computed_request_id,
+            );
+            let start = Instant::now();
+            let single_node_context = SingleNodeContext {
+                program_id: request.get_ref().program_id.to_string(),
+                elf_path: request.get_ref().elf_path.to_string(),
+                base_dir: request.get_ref().base_dir.to_string(),
+                private_input_path: request.get_ref().private_input_path.to_string(),
+                receipt_inputs_path: request.get_ref().receipt_inputs_path.to_string(),
+                target_step: request.get_ref().target_step,
+                seg_size: request.get_ref().seg_size,
+            };
+
+            let pipeline = self.pipeline.clone();
+            let single_node_func = move || pipeline.prove_single_node(&single_node_context);
+            let result = run_back_task(single_node_func).await;
+
+            let mut response = SingleNodeResponse {
+                proof_id: request.get_ref().proof_id.clone(),
+                computed_request_id: request.get_ref().computed_request_id.clone(),
+                output: match &result {
+                    Ok((_, x)) => x.clone(),
+                    _ => vec![],
+                },
+                ..Default::default()
+            };
+            on_done!(result, response);
+            let end = Instant::now();
+            let elapsed = end.duration_since(start);
+            tracing::info!(
+                "[single node] {}:{} code:{} elapsed:{} end",
+                request.get_ref().proof_id,
+                request.get_ref().computed_request_id,
+                response.result.as_ref().unwrap().code,
+                elapsed.as_secs()
+            );
+            Ok(Response::new(response))
+        })
+        .await
+    }
+
+    #[cfg(feature = "prover")]
+    async fn single_node(
+        &self,
+        _request: Request<SingleNodeRequest>,
+    ) -> tonic::Result<Response<SingleNodeResponse>, Status> {
+        Err(Status::unimplemented(
+            "single_node is not supported in zkm feature",
+        ))
     }
 }

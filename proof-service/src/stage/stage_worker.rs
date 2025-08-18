@@ -56,6 +56,69 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
             Ok(generate_context) => {
                 let mut check_at = get_timestamp();
                 let mut stage = Stage::new(generate_context.clone());
+                tracing::debug!(
+                    "[single_node]: task_id: {:?}, status: {:?}, step: {:?}",
+                    task.id,
+                    task.status,
+                    task.step
+                );
+                // single node handler.
+                if generate_context.single_node {
+                    if task.step != Step::Init as i32 {
+                        tracing::debug!("single node task, but it has already been processed");
+                        return;
+                    }
+                    // get single_node task
+                    let single_node_task = stage.get_single_node_task();
+                    let tls_config = tls_config.clone();
+                    let response = prover_client::single_node(
+                        single_node_task,
+                        tls_config,
+                        db.clone(),
+                        &task.id,
+                        task.check_at as u64,
+                        check_at,
+                    )
+                    .await;
+                    let mut result = vec![];
+                    if let Ok(single_node_task) = response {
+                        // handle the response
+                        stage.on_single_node_task(&single_node_task);
+                        if stage.generate_task.target_step == Step::Snark {
+                            result = single_node_task.output;
+                        }
+                    } else {
+                        stage.is_error = true;
+                    }
+                    if stage.is_error() {
+                        tracing::debug!("error in single node task");
+                        let status = stage_service::v1::Status::InternalError;
+                        db.update_stage_task(&task.id, status.into(), "")
+                            .await
+                            .unwrap();
+                    } else {
+                        tracing::debug!("success in single node task");
+                        // update the step
+                        db.update_stage_task_check_at(
+                            &task.id,
+                            task.check_at as u64,
+                            check_at,
+                            stage.step.into(),
+                        )
+                        .await
+                        .unwrap();
+                        // update task
+                        db.update_stage_task(
+                            &task.id,
+                            stage_service::v1::Status::Success.into(),
+                            &String::from_utf8(result).expect("Invalid UTF-8 bytes"),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    return;
+                }
+
                 let (tx, mut rx) = mpsc::channel(128);
                 stage.dispatch();
 

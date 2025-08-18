@@ -90,7 +90,7 @@ impl ProverNode {
         }
 
         if let Some(client) = client {
-            tracing::info!("Getting client {} status", self.addr);
+            // tracing::info!("Getting client {} status", self.addr);
             let client = ProverServiceClient::<Channel>::new(client);
 
             return Some(client);
