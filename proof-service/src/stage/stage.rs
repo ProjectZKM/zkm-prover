@@ -2,9 +2,9 @@ use crate::proto::includes::v1::Step;
 #[cfg(feature = "prover_v2")]
 use crate::stage::safe_read;
 use crate::stage::tasks::{
-    agg_task::AggTask, generate_task::GenerateTask, ProveTask, SnarkTask, SplitTask, Trace,
-    TASK_STATE_FAILED, TASK_STATE_INITIAL, TASK_STATE_PROCESSING, TASK_STATE_SUCCESS,
-    TASK_STATE_UNPROCESSED,
+    agg_task::AggTask, generate_task::GenerateTask, ProveTask, SingleNodeTask, SnarkTask,
+    SplitTask, Trace, TASK_STATE_FAILED, TASK_STATE_INITIAL, TASK_STATE_PROCESSING,
+    TASK_STATE_SUCCESS, TASK_STATE_UNPROCESSED,
 };
 use rayon::prelude::*;
 use std::{
@@ -630,6 +630,40 @@ impl Stage {
             .unwrap_or_else(|_| panic!("can not open {}", &self.generate_task.snark_path));
         f.write_all(&snark_task.output).unwrap();
         on_task!(snark_task, dst, self);
+    }
+    pub fn get_single_node_task(&self) -> SingleNodeTask {
+        SingleNodeTask {
+            task_id: uuid::Uuid::new_v4().to_string(),
+            program_id: self.generate_task.program_id.clone(),
+            base_dir: self.generate_task.base_dir.clone(),
+            proof_id: self.generate_task.proof_id.clone(),
+            state: TASK_STATE_UNPROCESSED,
+            elf_path: self.generate_task.elf_path.clone(),
+            private_input_path: self.generate_task.private_input_path.clone(),
+            receipt_inputs_path: self.generate_task.receipt_inputs_path.clone(),
+            target_step: self.generate_task.target_step,
+            seg_size: self.generate_task.seg_size,
+            ..Default::default()
+        }
+    }
+    pub fn on_single_node_task(&mut self, single_node_task: &SingleNodeTask) {
+        if single_node_task.state == TASK_STATE_SUCCESS {
+            tracing::info!(
+                "Single node task {} success, output size: {}",
+                single_node_task.task_id,
+                single_node_task.output.len()
+            );
+            if self.generate_task.target_step == Step::Agg {
+                // Here we also use snark_path to store agg proof ;
+                let mut f = std::fs::File::create(&self.generate_task.snark_path)
+                    .unwrap_or_else(|_| panic!("can not open {}", &self.generate_task.snark_path));
+                f.write_all(&single_node_task.output).unwrap();
+            }
+            self.step = Step::End;
+        } else {
+            self.is_error = true;
+            tracing::error!("Single node task {} failed", single_node_task.task_id);
+        }
     }
 }
 

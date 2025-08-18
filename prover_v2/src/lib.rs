@@ -19,6 +19,7 @@ pub mod root_prover;
 pub mod snark_prover;
 
 pub mod pipeline;
+pub mod single_node_prover;
 
 pub const FIRST_LAYER_BATCH_SIZE: usize = 1;
 

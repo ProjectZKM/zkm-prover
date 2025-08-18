@@ -130,7 +130,7 @@ impl StageService for StageServiceSVC {
                 };
                 if target_step != Step::Split && !composite_proof {
                     if let Some(result) = task.result {
-                        response.proof_with_public_inputs = if target_step == Step::Agg {
+                        response.proof_with_public_inputs = if target_step == Step::Agg && task.status == 0{
                             file::new(&proof_path).read().unwrap_or_default()
                         } else {
                             result.into_bytes()
@@ -247,6 +247,7 @@ impl StageService for StageServiceSVC {
             }
 
             let from_step = request.get_ref().from_step.unwrap_or(Step::Init.into());
+            let single_node = request.get_ref().single_node;
             if !(from_step == Step::Init as i32 || from_step == Step::Agg as i32) {
                 let response = GenerateProofResponse {
                     proof_id: request.get_ref().proof_id.clone(),
@@ -406,7 +407,8 @@ impl StageService for StageServiceSVC {
 
             if from_step == Step::Agg {
                 // if from_step is Agg, we need to check if the receipt_inputs is empty
-                if request.get_ref().receipt_inputs.is_empty() {
+                // or the single node is true
+                if request.get_ref().receipt_inputs.is_empty() || single_node {
                     let response = GenerateProofResponse {
                         proof_id: request.get_ref().proof_id.clone(),
                         status: InvalidParameter.into(),
@@ -526,6 +528,7 @@ impl StageService for StageServiceSVC {
                 max_prover_num,
                 from_step,
                 target_step,
+                single_node,
                 request.get_ref().composite_proof,
                 &receipt_inputs_path,
                 &receipts_path,

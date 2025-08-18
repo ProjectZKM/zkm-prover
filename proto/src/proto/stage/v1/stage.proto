@@ -39,6 +39,8 @@ message GenerateProofRequest {
   repeated bytes receipt_inputs = 12;
   repeated bytes receipts = 13;
   optional includes.v1.Step from_step = 14;
+  // if true, the proof will be generated in a single node
+  bool single_node = 15;
   uint32 max_prover_num = 16;
 }
 
