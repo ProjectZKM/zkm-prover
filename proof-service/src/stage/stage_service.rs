@@ -91,6 +91,7 @@ impl StageService for StageServiceSVC {
             if let Ok(task) = task {
                 response.status = task.status;
                 response.step = task.step;
+                response.proving_time = task.check_at as u64;
                 let execute_info: Vec<tasks::SplitTask> = self
                     .db
                     .get_prove_task_infos(&request.get_ref().proof_id, tasks::TASK_ITYPE_SPLIT)

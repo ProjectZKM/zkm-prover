@@ -55,6 +55,8 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
         let task_decoded = serde_json::from_str::<GenerateTask>(&context);
         match task_decoded {
             Ok(generate_context) => {
+                let task_start_time = std::time::Instant::now();
+
                 let mut check_at = get_timestamp();
                 let mut stage = Stage::new(generate_context.clone());
                 tracing::debug!(
@@ -110,11 +112,14 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                             .unwrap();
                     } else {
                         tracing::debug!("success in single node task");
-                        // update the step
+                        // record the task duration as millis
+                        let task_duration = task_start_time.elapsed().as_millis() as u64;
+
+                        // update the step, and store the duration in the `check_at` field.
                         db.update_stage_task_check_at(
                             &task.id,
-                            task.check_at as u64,
                             check_at,
+                            task_duration,
                             stage.step.into(),
                         )
                         .await
@@ -127,6 +132,8 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                         )
                         .await
                         .unwrap();
+
+                        info!("[stage] total_time {} ms", task_duration);
                     }
                     return;
                 }
@@ -305,6 +312,19 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                     } else {
                         vec![]
                     };
+
+                    // record the task duration as millis
+                    let task_duration = task_start_time.elapsed().as_millis() as u64;
+
+                    // update the step, and store the duration in the `check_at` field.
+                    db.update_stage_task_check_at(
+                        &task.id,
+                        task.check_at as u64,
+                        task_duration,
+                        stage.step.into(),
+                    )
+                    .await
+                    .unwrap();
                     db.update_stage_task(
                         &task.id,
                         stage_service::v1::Status::Success.into(),
@@ -312,7 +332,10 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                     )
                     .await
                     .unwrap();
-                    info!("[stage] finished {:?} ", stage);
+                    info!(
+                        "[stage] finished {:?} total_time {} ms",
+                        stage, task_duration
+                    );
                 }
             }
             Err(_) => {
