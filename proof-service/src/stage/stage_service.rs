@@ -130,11 +130,12 @@ impl StageService for StageServiceSVC {
                 };
                 if target_step != Step::Split && !composite_proof {
                     if let Some(result) = task.result {
-                        response.proof_with_public_inputs = if target_step == Step::Agg && task.status == 0{
-                            file::new(&proof_path).read().unwrap_or_default()
-                        } else {
-                            result.into_bytes()
-                        };
+                        response.proof_with_public_inputs =
+                            if target_step == Step::Agg && task.status == 0 {
+                                file::new(&proof_path).read().unwrap_or_default()
+                            } else {
+                                result.into_bytes()
+                            };
                     }
                     if let Some(fileserver_url) = &self.config.fileserver_url {
                         #[cfg(feature = "prover")]

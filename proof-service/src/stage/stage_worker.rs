@@ -15,6 +15,7 @@ use common::file;
 // use std::collections::HashMap;
 use std::sync::Arc;
 // use std::sync::Mutex;
+use crate::stage::tasks::SplitTask;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time;
 use tracing::{error, info, instrument, warn};
@@ -71,6 +72,12 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                     // get single_node task
                     let single_node_task = stage.get_single_node_task();
                     let tls_config = tls_config.clone();
+                    // We only need total_steps and proof_id for single node task.
+                    let mut split_task = SplitTask {
+                        task_id: uuid::Uuid::new_v4().to_string(),
+                        proof_id: single_node_task.proof_id.clone(),
+                        ..Default::default()
+                    };
                     let response = prover_client::single_node(
                         single_node_task,
                         tls_config,
@@ -87,9 +94,14 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                         if stage.generate_task.target_step == Step::Snark {
                             result = single_node_task.output;
                         }
+                        split_task.total_steps = single_node_task.total_cycles;
+                        split_task.state = TASK_STATE_SUCCESS;
                     } else {
                         stage.is_error = true;
+                        split_task.state = TASK_STATE_FAILED;
                     }
+                    save_task!(split_task, db, TASK_ITYPE_SPLIT);
+
                     if stage.is_error() {
                         tracing::debug!("error in single node task");
                         let status = stage_service::v1::Status::InternalError;

@@ -539,6 +539,7 @@ pub async fn single_node(
                     single_node_task.state = result_code_to_state(response_result.code);
                     // FIXME: node_info usage?
                     single_node_task.trace.node_info = addrs.clone();
+                    single_node_task.total_cycles = response.get_ref().total_steps;
                     single_node_task.output = response.get_ref().output.clone();
                     tracing::info!(
                         "[single node] rpc {} {}:{} code:{:?} message:{:?} end. Elapsed {:?}",
