@@ -62,10 +62,13 @@ impl Pipeline {
         })
     }
 
-    pub fn prove_single_node(&self, single_node_context: &SingleNodeContext) -> Result<(bool, Vec<u8>), String> {
+    pub fn prove_single_node(
+        &self,
+        single_node_context: &SingleNodeContext,
+    ) -> Result<(bool, u64, Vec<u8>), String> {
         self.single_node_prover
             .prove(single_node_context)
-            .map(|output| (true, output))
+            .map(|(cycles, output)| (true, cycles, output))
             .map_err(|e| {
                 tracing::error!("prove_single_node error {:#?}", e);
                 e.to_string()

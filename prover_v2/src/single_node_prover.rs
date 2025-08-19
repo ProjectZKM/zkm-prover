@@ -21,7 +21,7 @@ impl SingleNodeProver {
             proving_key_paths: proving_key_paths.into(),
         }
     }
-    pub fn prove(&self, ctx: &SingleNodeContext) -> anyhow::Result<Vec<u8>> {
+    pub fn prove(&self, ctx: &SingleNodeContext) -> anyhow::Result<(u64, Vec<u8>)> {
         let prover = get_prover();
         let mut network_prove = NetworkProve::new(ctx.seg_size);
         let opts = network_prove.opts;
@@ -90,6 +90,7 @@ impl SingleNodeProver {
             .map(|(reduce_proof, _)| reduce_proof.clone())
             .collect();
         let public_values = core_proof.public_values.clone();
+        let cycles = core_proof.cycles;
         // Generate the compressed proof.
         let reduced_proof = prover.compress(&zkm_vk, core_proof, deferred_proofs, opts)?;
         let proof = match Step::from_i32(ctx.target_step) {
@@ -112,6 +113,6 @@ impl SingleNodeProver {
         // write public values to file
         let public_values_path = format!("{}/wrap/public_values.bin", ctx.base_dir);
         file::new(&public_values_path).write_all(&public_values_stream)?;
-        Ok(serde_json::to_string(&proof)?.into_bytes())
+        Ok((cycles, serde_json::to_string(&proof)?.into_bytes()))
     }
 }

@@ -4,10 +4,10 @@ use tonic::{Request, Response, Status};
 
 use crate::proto::includes::v1::ProverVersion;
 use crate::proto::prover_service::v1::{
-    prover_service_server::ProverService, AggregateRequest, AggregateResponse, GetStatusRequest,
-    GetStatusResponse, GetTaskResultRequest, GetTaskResultResponse, ProveRequest, ProveResponse,
-    Result, ResultCode, SnarkProofRequest, SnarkProofResponse, SplitElfRequest, SplitElfResponse,
-    get_status_response, SingleNodeRequest, SingleNodeResponse,
+    get_status_response, prover_service_server::ProverService, AggregateRequest, AggregateResponse,
+    GetStatusRequest, GetStatusResponse, GetTaskResultRequest, GetTaskResultResponse, ProveRequest,
+    ProveResponse, Result, ResultCode, SingleNodeRequest, SingleNodeResponse, SnarkProofRequest,
+    SnarkProofResponse, SplitElfRequest, SplitElfResponse,
 };
 use crate::{config, metrics};
 #[cfg(feature = "prover")]
@@ -384,11 +384,18 @@ impl ProverService for ProverServiceSVC {
             let mut response = SingleNodeResponse {
                 proof_id: request.get_ref().proof_id.clone(),
                 computed_request_id: request.get_ref().computed_request_id.clone(),
+                total_steps: result.clone().unwrap_or_default().1,
                 output: match &result {
-                    Ok((_, x)) => x.clone(),
+                    Ok((_, _, x)) => x.clone(),
                     _ => vec![],
                 },
                 ..Default::default()
+            };
+
+            // True if and only if no error occurs and cycles > 0
+            let result: std::result::Result<(bool, Vec<u8>), String> = match result {
+                Ok(cycle) => Ok((cycle.1 > 0 && cycle.0, vec![])),
+                Err(e) => Err(e),
             };
             on_done!(result, response);
             let end = Instant::now();
