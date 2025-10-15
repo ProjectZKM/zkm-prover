@@ -14,14 +14,14 @@ zstd = "0.13.3"
 lru = "0.14.0"
 parking_lot = "0.12"
 
-zkm-core-machine = { git = "https://github.com/ProjectZKM/Ziren", tag = "v1.2.0" }
-zkm-core-executor = { git = "https://github.com/ProjectZKM/Ziren", tag = "v1.2.0" }
-zkm-stark = { git = "https://github.com/ProjectZKM/Ziren", tag = "v1.2.0" }
-zkm-prover = { git = "https://github.com/ProjectZKM/Ziren", tag = "v1.2.0" }
-zkm-recursion-compiler = { git = "https://github.com/ProjectZKM/Ziren", tag = "v1.2.0" }
-zkm-recursion-core = { git = "https://github.com/ProjectZKM/Ziren", tag = "v1.2.0" }
-zkm-recursion-circuit = { git = "https://github.com/ProjectZKM/Ziren", tag = "v1.2.0" }
-zkm-sdk = { git = "https://github.com/ProjectZKM/Ziren", tag = "v1.2.0" }
+zkm-core-machine = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-core-executor = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-stark = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-prover = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-recursion-compiler = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-recursion-core = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-recursion-circuit = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-sdk = { git = "https://github.com/ProjectZKM/Ziren" }
 
 p3-maybe-rayon = { git = "https://github.com/ProjectZKM/Plonky3" }
 
