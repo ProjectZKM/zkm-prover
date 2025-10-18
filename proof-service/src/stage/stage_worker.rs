@@ -178,8 +178,9 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                                     }
                                 });
                             }
-                            // This is a temporary workaround.
-                            if stage.count_processing_prove_tasks() < max_prover_num as usize {
+
+                            // Dispatch prove tasks until the concurrent prover limit is reached.
+                            while stage.count_processing_prove_tasks() < max_prover_num as usize {
                                 if let Some(prove_task) = stage.get_prove_task() {
                                     let tx = tx.clone();
                                     let tls_config = tls_config.clone();
@@ -196,15 +197,18 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                                             let _ = tx.send(Task::Prove(prove_task)).await;
                                         }
                                     });
+                                } else {
+                                    // No more prove tasks available, break the inner loop.
+                                    break;
                                 }
                             }
 
-                            if stage.is_tasks_gen_done
+                            // Dispatch aggregate tasks if conditions are met.
+                            while stage.is_tasks_gen_done
                                 && stage.count_unfinished_prove_tasks() < max_prover_num as usize
                             {
-                                let agg_task = stage.get_agg_task();
-                                tracing::debug!("get_agg_task: {:?}", agg_task.is_some());
-                                if let Some(agg_task) = agg_task {
+                                if let Some(agg_task) = stage.get_agg_task() {
+                                    tracing::debug!("get_agg_task: true");
                                     let tx = tx.clone();
                                     let tls_config = tls_config.clone();
                                     let cur_count = cur_prover_num.clone();
@@ -220,6 +224,9 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                                             let _ = tx.send(Task::Agg(agg_task)).await;
                                         }
                                     });
+                                } else {
+                                    // No more aggregation tasks available, break the inner loop.
+                                    break;
                                 }
                             }
                         }
