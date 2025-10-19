@@ -4,7 +4,7 @@ use crate::{get_prover, NetworkProve, KEY_CACHE, PROGRAM_CACHE};
 use common::file;
 use std::path::PathBuf;
 use zkm_core_executor::ZKMReduceProof;
-use zkm_prover::{ZKMProvingKey, ZKMVerifyingKey};
+use zkm_prover::ZKMVerifyingKey;
 use zkm_sdk::network::prover::stage_service::Step;
 use zkm_sdk::ZKMProof;
 use zkm_stark::koala_bear_poseidon2::KoalaBearPoseidon2;
@@ -49,6 +49,7 @@ impl SingleNodeProver {
             }
             tracing::info!("Write {} receipts", receipts.len());
         }
+
         // get program from cache or generate new ones
         let mut program_cache = PROGRAM_CACHE.lock();
         let program = if let Some(program) = program_cache.cache.get(&ctx.program_id) {
@@ -62,6 +63,7 @@ impl SingleNodeProver {
             program_cache.push(ctx.program_id.clone(), program);
             program_cache.cache.get(&ctx.program_id).unwrap()
         };
+
         // get keys from cache or generate new ones
         let mut cache = KEY_CACHE.lock();
         let (pk, vk) = if let Some((pk, vk)) = cache.cache.get(&ctx.program_id) {
@@ -74,25 +76,31 @@ impl SingleNodeProver {
             let (pk, vk) = &cache.cache.get(&ctx.program_id).unwrap();
             (pk, vk)
         };
+
         let vk_bytes = bincode::serialize(&vk)?;
         file::new(&format!("{}/vk.bin", ctx.base_dir)).write_all(&vk_bytes)?;
-        let zkm_vk = ZKMVerifyingKey { vk: vk.clone() };
-        let zkm_pk = ZKMProvingKey {
-            pk: pk.clone(),
-            elf,
-            vk: zkm_vk.clone(),
-        };
-        let core_proof = prover.prove_core(&zkm_pk, &network_prove.stdin, opts, context)?;
+
+        let core_proof =
+            prover.prove_core(pk, program.clone(), &network_prove.stdin, opts, context)?;
+
         let deferred_proofs = network_prove
             .stdin
             .proofs
             .iter()
             .map(|(reduce_proof, _)| reduce_proof.clone())
             .collect();
+
         let public_values = core_proof.public_values.clone();
         let cycles = core_proof.cycles;
+
         // Generate the compressed proof.
-        let reduced_proof = prover.compress(&zkm_vk, core_proof, deferred_proofs, opts)?;
+        let reduced_proof = prover.compress(
+            &ZKMVerifyingKey { vk: vk.clone() },
+            core_proof,
+            deferred_proofs,
+            opts,
+        )?;
+
         let proof = match Step::from_i32(ctx.target_step) {
             Some(Step::InAgg) => ZKMProof::Compressed(Box::new(reduced_proof)),
             Some(Step::InSnark) => {
@@ -109,10 +117,12 @@ impl SingleNodeProver {
                 unreachable!("Unsupported target step: {}", ctx.target_step);
             }
         };
+
         let public_values_stream = public_values.to_vec();
         // write public values to file
         let public_values_path = format!("{}/wrap/public_values.bin", ctx.base_dir);
         file::new(&public_values_path).write_all(&public_values_stream)?;
+
         Ok((cycles, serde_json::to_string(&proof)?.into_bytes()))
     }
 }
