@@ -48,96 +48,113 @@ macro_rules! save_task {
     };
 }
 
+/// Helper function to dispatch a task to a prover client in a new tokio task.
+///
+/// This encapsulates the common pattern of:
+/// 1. Spawning a new asynchronous task.
+/// 2. Calling a specific `prover_client` function.
+/// 3. Wrapping the specific result type (e.g., `ProveTask`) into the general `Task` enum.
+/// 4. Sending the wrapped task back through the results channel.
+///
+/// # Type Parameters
+/// * `T`: The specific task type (e.g., `SplitTask`, `ProveTask`).
+/// * `F`: The type of the asynchronous client call function.
+/// * `Fut`: The future returned by the client call.
+/// * `W`: The type of the closure that wraps the result `T` into a `Task`.
+fn dispatch_task<T, F, Fut, W>(
+    task_payload: T,
+    client_call: F,
+    wrapper: W,
+    tx: mpsc::Sender<Task>,
+    tls_config: Option<TlsConfig>,
+    cur_prover_num: Arc<tokio::sync::Mutex<u32>>,
+    max_prover_num: u32,
+) where
+    T: Send + 'static,
+    F: FnOnce(T, Option<TlsConfig>, Arc<tokio::sync::Mutex<u32>>, u32) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Option<T>> + Send,
+    W: FnOnce(T) -> Task + Send + 'static,
+{
+    tokio::spawn(async move {
+        if let Some(response_payload) =
+            client_call(task_payload, tls_config, cur_prover_num, max_prover_num).await
+        {
+            let task_result = wrapper(response_payload);
+            if let Err(e) = tx.send(task_result).await {
+                error!("Failed to send task result back to main loop: {}", e);
+            }
+        }
+    });
+}
+
+/// Handles the logic for a single-node proving task.
+#[instrument(level = "info", skip_all, fields(proof_id = %task.id))]
+async fn run_single_node_task(
+    task: &StageTask,
+    mut stage: Stage,
+    tls_config: Option<TlsConfig>,
+    db: &Database,
+    task_start_time: std::time::Instant,
+) {
+    if task.step != Step::Init as i32 {
+        tracing::debug!("single node task, but it has already been processed");
+        return;
+    }
+
+    let single_node_task = stage.get_single_node_task();
+    let mut split_task = SplitTask {
+        task_id: uuid::Uuid::new_v4().to_string(),
+        proof_id: single_node_task.proof_id.clone(),
+        ..Default::default()
+    };
+
+    let response = prover_client::single_node(
+        single_node_task,
+        tls_config,
+        db.clone(),
+        &task.id,
+        task.check_at as u64,
+        get_timestamp(),
+    )
+    .await;
+
+    let mut result = vec![];
+    if let Ok(single_node_task) = response {
+        stage.on_single_node_task(&single_node_task);
+        if stage.generate_task.target_step == Step::Snark {
+            result = single_node_task.output;
+        }
+        split_task.total_steps = single_node_task.total_cycles;
+        split_task.state = TASK_STATE_SUCCESS;
+    } else {
+        stage.is_error = true;
+        split_task.state = TASK_STATE_FAILED;
+    }
+    save_task!(split_task, db, TASK_ITYPE_SPLIT);
+
+    // Finalize task status in the database
+    finalize_stage_task(task, &stage, task_start_time, result, db).await;
+}
+
 #[instrument(level = "info", skip_all, fields(proof_id = %task.id))]
 async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: Database) {
     info!("Running stage task");
-    if let Some(context) = task.context {
+    if let Some(ref context) = task.context {
         let task_decoded = serde_json::from_str::<GenerateTask>(&context);
         match task_decoded {
             Ok(generate_context) => {
                 let task_start_time = std::time::Instant::now();
 
-                let mut check_at = get_timestamp();
                 let mut stage = Stage::new(generate_context.clone());
-                tracing::debug!(
-                    "[single_node]: task_id: {:?}, status: {:?}, step: {:?}",
-                    task.id,
-                    task.status,
-                    task.step
-                );
+
                 // single node handler.
                 if generate_context.single_node {
-                    if task.step != Step::Init as i32 {
-                        tracing::debug!("single node task, but it has already been processed");
-                        return;
-                    }
-                    // get single_node task
-                    let single_node_task = stage.get_single_node_task();
-                    let tls_config = tls_config.clone();
-                    // We only need total_steps and proof_id for single node task.
-                    let mut split_task = SplitTask {
-                        task_id: uuid::Uuid::new_v4().to_string(),
-                        proof_id: single_node_task.proof_id.clone(),
-                        ..Default::default()
-                    };
-                    let response = prover_client::single_node(
-                        single_node_task,
-                        tls_config,
-                        db.clone(),
-                        &task.id,
-                        task.check_at as u64,
-                        check_at,
-                    )
-                    .await;
-                    let mut result = vec![];
-                    if let Ok(single_node_task) = response {
-                        // handle the response
-                        stage.on_single_node_task(&single_node_task);
-                        if stage.generate_task.target_step == Step::Snark {
-                            result = single_node_task.output;
-                        }
-                        split_task.total_steps = single_node_task.total_cycles;
-                        split_task.state = TASK_STATE_SUCCESS;
-                    } else {
-                        stage.is_error = true;
-                        split_task.state = TASK_STATE_FAILED;
-                    }
-                    save_task!(split_task, db, TASK_ITYPE_SPLIT);
-
-                    if stage.is_error() {
-                        tracing::debug!("error in single node task");
-                        let status = stage_service::v1::Status::InternalError;
-                        db.update_stage_task(&task.id, status.into(), "")
-                            .await
-                            .unwrap();
-                    } else {
-                        tracing::debug!("success in single node task");
-                        // record the task duration as millis
-                        let task_duration = task_start_time.elapsed().as_millis() as u64;
-
-                        // update the step, and store the duration in the `check_at` field.
-                        db.update_stage_task_check_at(
-                            &task.id,
-                            check_at,
-                            task_duration,
-                            stage.step.into(),
-                        )
-                        .await
-                        .unwrap();
-                        // update task
-                        db.update_stage_task(
-                            &task.id,
-                            stage_service::v1::Status::Success.into(),
-                            &String::from_utf8(result).expect("Invalid UTF-8 bytes"),
-                        )
-                        .await
-                        .unwrap();
-
-                        info!("[stage] total_time {} ms", task_duration);
-                    }
+                    run_single_node_task(&task, stage, tls_config, &db, task_start_time).await;
                     return;
                 }
 
+                // Distributed (multi-node) handler
+                let mut check_at = get_timestamp();
                 let (tx, mut rx) = mpsc::channel(128);
                 stage.dispatch();
 
@@ -160,43 +177,31 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                     let current_step = stage.step;
                     match stage.step {
                         Step::Prove => {
-                            let split_task = stage.get_split_task();
-                            if let Some(split_task) = split_task {
-                                let tx = tx.clone();
-                                let tls_config = tls_config.clone();
-                                let cur_count = cur_prover_num.clone();
-                                tokio::spawn(async move {
-                                    let response = prover_client::split(
-                                        split_task,
-                                        tls_config,
-                                        cur_count,
-                                        max_prover_num,
-                                    )
-                                    .await;
-                                    if let Some(split_task) = response {
-                                        let _ = tx.send(Task::Split(split_task)).await;
-                                    }
-                                });
+                            // Dispatch split tasks.
+                            if let Some(task_payload) = stage.get_split_task() {
+                                dispatch_task(
+                                    task_payload,
+                                    prover_client::split,
+                                    Task::Split,
+                                    tx.clone(),
+                                    tls_config.clone(),
+                                    cur_prover_num.clone(),
+                                    max_prover_num,
+                                );
                             }
 
                             // Dispatch prove tasks until the concurrent prover limit is reached.
                             while stage.count_processing_prove_tasks() < max_prover_num as usize {
-                                if let Some(prove_task) = stage.get_prove_task() {
-                                    let tx = tx.clone();
-                                    let tls_config = tls_config.clone();
-                                    let cur_count = cur_prover_num.clone();
-                                    tokio::spawn(async move {
-                                        let response = prover_client::prove(
-                                            prove_task,
-                                            tls_config,
-                                            cur_count,
-                                            max_prover_num,
-                                        )
-                                        .await;
-                                        if let Some(prove_task) = response {
-                                            let _ = tx.send(Task::Prove(prove_task)).await;
-                                        }
-                                    });
+                                if let Some(task_payload) = stage.get_prove_task() {
+                                    dispatch_task(
+                                        task_payload,
+                                        prover_client::prove,
+                                        Task::Prove,
+                                        tx.clone(),
+                                        tls_config.clone(),
+                                        cur_prover_num.clone(),
+                                        max_prover_num,
+                                    );
                                 } else {
                                     // No more prove tasks available, break the inner loop.
                                     break;
@@ -207,51 +212,40 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                             while stage.is_tasks_gen_done
                                 && stage.count_unfinished_prove_tasks() < max_prover_num as usize
                             {
-                                if let Some(agg_task) = stage.get_agg_task() {
+                                if let Some(task_payload) = stage.get_agg_task() {
                                     tracing::debug!("get_agg_task: true");
-                                    let tx = tx.clone();
-                                    let tls_config = tls_config.clone();
-                                    let cur_count = cur_prover_num.clone();
-                                    tokio::spawn(async move {
-                                        let response = prover_client::aggregate(
-                                            agg_task,
-                                            tls_config,
-                                            cur_count,
-                                            max_prover_num,
-                                        )
-                                        .await;
-                                        if let Some(agg_task) = response {
-                                            let _ = tx.send(Task::Agg(agg_task)).await;
-                                        }
-                                    });
+                                    dispatch_task(
+                                        task_payload,
+                                        prover_client::aggregate,
+                                        Task::Agg,
+                                        tx.clone(),
+                                        tls_config.clone(),
+                                        cur_prover_num.clone(),
+                                        max_prover_num,
+                                    );
                                 } else {
                                     // No more aggregation tasks available, break the inner loop.
+                                    tracing::debug!("get_agg_task: false");
                                     break;
                                 }
                             }
                         }
                         Step::Snark => {
-                            let snark_task = stage.get_snark_task();
-                            if let Some(snark_task) = snark_task {
-                                let tx = tx.clone();
-                                let tls_config = tls_config.clone();
-                                let cur_count = cur_prover_num.clone();
-                                tokio::spawn(async move {
-                                    let response = prover_client::snark_proof(
-                                        snark_task,
-                                        tls_config,
-                                        cur_count,
-                                        max_prover_num,
-                                    )
-                                    .await;
-                                    if let Some(snark_task) = response {
-                                        let _ = tx.send(Task::Snark(snark_task)).await;
-                                    }
-                                });
+                            if let Some(task_payload) = stage.get_snark_task() {
+                                dispatch_task(
+                                    task_payload,
+                                    prover_client::snark_proof,
+                                    Task::Snark,
+                                    tx.clone(),
+                                    tls_config.clone(),
+                                    cur_prover_num.clone(),
+                                    max_prover_num,
+                                );
                             }
                         }
                         _ => {}
                     }
+
                     tokio::select! {
                         task = rx.recv() => {
                             if let Some(task) = task {
@@ -282,6 +276,7 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                         break;
                     }
                     stage.dispatch();
+
                     let ts_now = get_timestamp();
                     if check_at + 10 < ts_now || current_step != stage.step {
                         check_at = ts_now;
@@ -300,50 +295,15 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                         }
                     }
                 }
-                if stage.is_error() {
-                    let get_status = || match stage.step {
-                        Step::Split => stage_service::v1::Status::SplitError,
-                        Step::Prove => stage_service::v1::Status::ProveError,
-                        Step::Agg => stage_service::v1::Status::AggError,
-                        Step::Snark => stage_service::v1::Status::SnarkError,
-                        _ => stage_service::v1::Status::InternalError,
-                    };
-                    let status = get_status();
-                    db.update_stage_task(&task.id, status.into(), "")
-                        .await
-                        .unwrap();
+
+                let result = if stage.is_success() && generate_context.target_step == Step::Snark {
+                    file::new(&generate_context.snark_path)
+                        .read()
+                        .unwrap_or_default()
                 } else {
-                    // If generate compressed proof, do not store in database, use file instead.
-                    let result = if generate_context.target_step == Step::Snark {
-                        file::new(&generate_context.snark_path).read().unwrap()
-                    } else {
-                        vec![]
-                    };
-
-                    // record the task duration as millis
-                    let task_duration = task_start_time.elapsed().as_millis() as u64;
-
-                    // update the step, and store the duration in the `check_at` field.
-                    db.update_stage_task_check_at(
-                        &task.id,
-                        task.check_at as u64,
-                        task_duration,
-                        stage.step.into(),
-                    )
-                    .await
-                    .unwrap();
-                    db.update_stage_task(
-                        &task.id,
-                        stage_service::v1::Status::Success.into(),
-                        &String::from_utf8(result).expect("Invalid UTF-8 bytes"),
-                    )
-                    .await
-                    .unwrap();
-                    info!(
-                        "[stage] finished {:?} total_time {} ms",
-                        stage, task_duration
-                    );
-                }
+                    vec![]
+                };
+                finalize_stage_task(&task, &stage, task_start_time, result, &db).await;
             }
             Err(_) => {
                 let _ = db
@@ -355,6 +315,62 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                     .await;
             }
         }
+    }
+}
+
+/// Updates the final status of a StageTask in the database after it has completed or failed.
+async fn finalize_stage_task(
+    task: &StageTask,
+    stage: &Stage,
+    task_start_time: std::time::Instant,
+    result: Vec<u8>,
+    db: &Database,
+) {
+    if stage.is_error() {
+        let get_status = || match stage.step {
+            Step::Split => stage_service::v1::Status::SplitError,
+            Step::Prove => stage_service::v1::Status::ProveError,
+            Step::Agg => stage_service::v1::Status::AggError,
+            Step::Snark => stage_service::v1::Status::SnarkError,
+            _ => stage_service::v1::Status::InternalError,
+        };
+        let status = get_status();
+        if let Err(e) = db.update_stage_task(&task.id, status.into(), "").await {
+            error!("Failed to update stage task to error status: {:?}", e);
+        }
+    } else if stage.is_success() {
+        // Task is successful
+        let task_duration = task_start_time.elapsed().as_millis() as u64;
+
+        // update the step, and store the duration in the `check_at` field.
+        if let Err(e) = db
+            .update_stage_task_check_at(
+                &task.id,
+                task.check_at as u64,
+                task_duration,
+                stage.step.into(),
+            )
+            .await
+        {
+            error!("Failed to update stage task check_at on success: {:?}", e);
+        }
+
+        let result_str = String::from_utf8(result).expect("Invalid UTF-8 bytes in proof result");
+        if let Err(e) = db
+            .update_stage_task(
+                &task.id,
+                stage_service::v1::Status::Success.into(),
+                &result_str,
+            )
+            .await
+        {
+            error!("Failed to update stage task to success status: {:?}", e);
+        }
+
+        info!(
+            "[stage] finished {:?} total_time {} ms",
+            stage, task_duration
+        );
     }
 }
 
