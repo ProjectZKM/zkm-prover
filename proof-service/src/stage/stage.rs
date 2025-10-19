@@ -270,7 +270,7 @@ impl Stage {
         }
         // Pre-allocate 64 tasks
         if self.prove_tasks.is_empty() {
-            self.prove_tasks = (0..64)
+            self.prove_tasks = (0..16)
                 .into_par_iter()
                 .map(|i| self.task_with_no(i))
                 .collect();
