@@ -8,6 +8,7 @@ use std::sync::{
 };
 use std::thread::ScopedJoinHandle;
 use std::time::Instant;
+use uuid::Uuid;
 
 use p3_maybe_rayon::prelude::*;
 use zkm_core_executor::{
@@ -289,12 +290,6 @@ impl Executor {
                                 let base_index = *segment_index;
                                 *segment_index += records.len() + deferred.len();
 
-                                write_file(
-                                    format!("{}/segments.txt", ctx.seg_path),
-                                    segment_index.to_string().as_bytes(),
-                                )
-                                .expect("Failed to write file_no");
-
                                 // Let another worker update the state.
                                 record_gen_sync.advance_turn();
 
@@ -307,6 +302,8 @@ impl Executor {
                                 .chain(deferred.into_iter().map(|r| Segment::Record(Box::new(r))))
                                 .collect();
 
+                                let callback = ctx.segment_callback.clone();
+                                let job_id = ctx.job_id.clone();
                                 segments.par_iter().enumerate().for_each(|(i, segment)| {
                                     let now = Instant::now();
                                     let encoded_segment = bincode::serialize(&segment).unwrap();
@@ -314,17 +311,26 @@ impl Executor {
                                     let compressed_segment =
                                         zstd::stream::encode_all(&*encoded_segment, 2)
                                             .expect("zstd compress failed");
-                                    write_file(
-                                        format!("{}/{}", ctx.seg_path, base_index + i),
-                                        &compressed_segment,
-                                    )
-                                    .expect("Failed to write segment");
-
                                     tracing::info!(
                                         "Wrote record {} in {:?}",
                                         base_index + i,
                                         now.elapsed()
                                     );
+
+                                    if let Some(callback) = &callback {
+                                        let token = format!(
+                                            "{}-{}-{}",
+                                            job_id,
+                                            base_index + i,
+                                            Uuid::new_v4()
+                                        );
+                                        callback(crate::contexts::SegmentPayload {
+                                            index: base_index + i,
+                                            token,
+                                            generated: base_index + i + 1,
+                                            bytes: Arc::new(compressed_segment),
+                                        });
+                                    }
                                 });
 
                                 // process deferred proofs
@@ -433,14 +439,4 @@ impl Executor {
             Ok((cycles, total_segments as u32, public_values_stream))
         })
     }
-}
-
-fn write_file(path: String, buf: &[u8]) -> anyhow::Result<()> {
-    let tmp_path = format!("{path}.tmp");
-    let mut file = File::create(&tmp_path)?;
-    file.write_all(buf)?;
-    file.sync_all()?;
-    std::fs::rename(tmp_path, path)?;
-
-    Ok(())
 }

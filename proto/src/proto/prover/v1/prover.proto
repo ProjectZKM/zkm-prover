@@ -27,7 +27,10 @@ service ProverService {
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse) {}
   rpc GetTaskResult(GetTaskResultRequest) returns (GetTaskResultResponse) {}
   rpc SplitElf(SplitElfRequest) returns (SplitElfResponse) {}
+  rpc StreamSegments(StreamSegmentsRequest) returns (stream SegmentHandle) {}
   rpc Prove(ProveRequest) returns (ProveResponse) {}
+  rpc FetchSegment(FetchSegmentRequest) returns (FetchSegmentResponse) {}
+  rpc ReleaseSegment(ReleaseSegmentRequest) returns (ReleaseSegmentResponse) {}
   rpc Aggregate(AggregateRequest) returns (AggregateResponse) {}
   rpc SnarkProof(SnarkProofRequest) returns (SnarkProofResponse) {}
   rpc SingleNode(SingleNodeRequest) returns (SingleNodeResponse) {}
@@ -87,17 +90,32 @@ message SplitElfResponse {
   uint32 total_segments = 5;
 }
 
+message SegmentHandle {
+  string proof_id = 1;
+  string provider_addr = 2;
+  string token = 3;
+  uint32 index = 4;
+  uint32 total_segments_partial = 5;
+}
+
+message StreamSegmentsRequest {
+  string proof_id = 1;
+  string computed_request_id = 2;
+}
+
 message ProveRequest {
   string proof_id = 1;
   string computed_request_id = 2;
   string program_id = 3;
-  string segment = 4;
-  //  bytes segment = 4;
+  string segment_path = 4 [deprecated = true];
   optional uint64 block_no = 5;
   uint32 seg_size = 6;
   string elf_path = 7;
   repeated bytes receipts_input = 8;
   uint32 index = 9;
+  string segment_provider_addr = 10;
+  string segment_token = 11;
+  string segment_job_id = 12;
 }
 
 message ProveResponse {
@@ -144,6 +162,26 @@ message SnarkProofResponse {
   bytes snark_proof_with_public_inputs = 3;
   Result result = 4;
 }
+
+message FetchSegmentRequest {
+  string proof_id = 1;
+  string token = 2;
+  uint32 index = 3;
+  string computed_request_id = 4;
+}
+
+message FetchSegmentResponse {
+  bytes segment = 1;
+}
+
+message ReleaseSegmentRequest {
+  string proof_id = 1;
+  string token = 2;
+  uint32 index = 3;
+  string computed_request_id = 4;
+}
+
+message ReleaseSegmentResponse {}
 
 message SingleNodeRequest {
   string proof_id = 1;

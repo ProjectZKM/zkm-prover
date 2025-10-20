@@ -15,6 +15,7 @@ use common::file;
 // use std::collections::HashMap;
 use std::sync::Arc;
 // use std::sync::Mutex;
+use crate::stage::segment_pool::SegmentDescriptor;
 use crate::stage::tasks::SplitTask;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time;
@@ -303,7 +304,14 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                 } else {
                     vec![]
                 };
+                let drained_segments = stage.drain_segments();
                 finalize_stage_task(&task, &stage, task_start_time, result, &db).await;
+                release_segment_handles(
+                    &stage.generate_task.proof_id,
+                    drained_segments,
+                    tls_config.clone(),
+                )
+                .await;
             }
             Err(_) => {
                 let _ = db
@@ -314,6 +322,26 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                     )
                     .await;
             }
+        }
+    }
+}
+
+async fn release_segment_handles(
+    proof_id: &str,
+    descriptors: Vec<SegmentDescriptor>,
+    tls_config: Option<TlsConfig>,
+) {
+    for descriptor in descriptors {
+        if let Err(err) =
+            prover_client::release_segment_handle(proof_id, &descriptor, tls_config.clone()).await
+        {
+            tracing::warn!(
+                "release segment {}:{} via {} failed: {:?}",
+                proof_id,
+                descriptor.index,
+                descriptor.provider_addr,
+                err
+            );
         }
     }
 }

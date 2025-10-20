@@ -1,13 +1,26 @@
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::io::Write as _;
+use std::pin::Pin;
+use std::result::Result as StdResult;
+use std::sync::Arc;
 use std::time::Instant;
+
+use once_cell::sync::Lazy;
+use parking_lot::Mutex as ParkingMutex;
+use tempfile::NamedTempFile;
+use tokio::sync::broadcast;
+use tokio_stream::{wrappers::BroadcastStream, Stream as TokioStream, StreamExt};
 use tonic::{Request, Response, Status};
 
 use crate::proto::includes::v1::ProverVersion;
+use crate::proto::prover_service::v1::prover_service_client::ProverServiceClient;
 use crate::proto::prover_service::v1::{
-    get_status_response, prover_service_server::ProverService, AggregateRequest, AggregateResponse,
-    GetStatusRequest, GetStatusResponse, GetTaskResultRequest, GetTaskResultResponse, ProveRequest,
-    ProveResponse, Result, ResultCode, SingleNodeRequest, SingleNodeResponse, SnarkProofRequest,
-    SnarkProofResponse, SplitElfRequest, SplitElfResponse,
+    prover_service_server::ProverService, AggregateRequest, AggregateResponse, FetchSegmentRequest,
+    FetchSegmentResponse, GetStatusRequest, GetStatusResponse, GetTaskResultRequest,
+    GetTaskResultResponse, ProveRequest, ProveResponse, ReleaseSegmentRequest,
+    ReleaseSegmentResponse, Result, ResultCode, SegmentHandle, SingleNodeRequest,
+    SingleNodeResponse, SnarkProofRequest, SnarkProofResponse, SplitElfRequest, SplitElfResponse,
+    StreamSegmentsRequest,
 };
 use crate::{config, metrics};
 #[cfg(feature = "prover")]
@@ -51,6 +64,153 @@ async fn run_back_task<
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segment_manager_store_fetch_release() {
+        let manager = SegmentManager::default();
+        let key = SegmentKey::new("proof", "job");
+
+        // Simulate stream subscription preceding job registration.
+        let _ = manager.subscribe(&key);
+        manager.register_job(key.clone());
+
+        let mut handle = SegmentHandle::default();
+        handle.proof_id = "proof".into();
+        handle.provider_addr = "addr".into();
+        handle.token = "token".into();
+        handle.index = 1;
+        handle.total_segments_partial = 1;
+
+        let bytes = Arc::new(vec![1u8, 2, 3]);
+        manager.publish(&key, handle.clone(), Arc::clone(&bytes));
+
+        let stored = manager
+            .segment(&key, &handle.token)
+            .expect("segment stored");
+        assert_eq!(*stored, vec![1, 2, 3]);
+
+        manager.release(&key, &handle.token);
+        assert!(manager.segment(&key, &handle.token).is_none());
+
+        manager.mark_finished(&key);
+        // After cleanup, a fresh subscription should be possible without stale data.
+        let _ = manager.subscribe(&key);
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct SegmentKey {
+    proof_id: String,
+    computed_request_id: String,
+}
+
+impl SegmentKey {
+    fn new(proof_id: &str, computed_request_id: &str) -> Self {
+        SegmentKey {
+            proof_id: proof_id.to_string(),
+            computed_request_id: computed_request_id.to_string(),
+        }
+    }
+}
+
+struct SegmentEntry {
+    sender: broadcast::Sender<SegmentHandle>,
+    segments: HashMap<String, Arc<Vec<u8>>>,
+    finished: bool,
+}
+
+impl SegmentEntry {
+    fn new(sender: broadcast::Sender<SegmentHandle>) -> Self {
+        Self {
+            sender,
+            segments: HashMap::new(),
+            finished: false,
+        }
+    }
+}
+
+#[derive(Default)]
+struct SegmentManager {
+    inner: ParkingMutex<HashMap<SegmentKey, SegmentEntry>>,
+}
+
+static SEGMENT_MANAGER: Lazy<SegmentManager> = Lazy::new(SegmentManager::default);
+
+impl SegmentManager {
+    fn subscribe(&self, key: &SegmentKey) -> broadcast::Receiver<SegmentHandle> {
+        let mut guard = self.inner.lock();
+        guard
+            .entry(key.clone())
+            .or_insert_with(|| {
+                let (sender, _) = broadcast::channel(512);
+                SegmentEntry::new(sender)
+            })
+            .sender
+            .subscribe()
+    }
+
+    fn register_job(&self, key: SegmentKey) -> broadcast::Sender<SegmentHandle> {
+        let mut guard = self.inner.lock();
+        let entry = guard.entry(key).or_insert_with(|| {
+            let (sender, _) = broadcast::channel(512);
+            SegmentEntry::new(sender)
+        });
+        entry.segments.clear();
+        entry.finished = false;
+        entry.sender.clone()
+    }
+
+    fn publish(&self, key: &SegmentKey, handle: SegmentHandle, bytes: Arc<Vec<u8>>) {
+        let sender_opt = {
+            let mut guard = self.inner.lock();
+            if let Some(entry) = guard.get_mut(key) {
+                entry
+                    .segments
+                    .insert(handle.token.clone(), Arc::clone(&bytes));
+                Some(entry.sender.clone())
+            } else {
+                None
+            }
+        };
+
+        if let Some(sender) = sender_opt {
+            if let Err(err) = sender.send(handle) {
+                tracing::warn!("broadcast segment handle failed: {}", err);
+            }
+        }
+    }
+
+    fn release(&self, key: &SegmentKey, token: &str) {
+        let mut guard = self.inner.lock();
+        if let Some(entry) = guard.get_mut(key) {
+            entry.segments.remove(token);
+            if entry.finished && entry.segments.is_empty() {
+                guard.remove(key);
+            }
+        }
+    }
+
+    fn mark_finished(&self, key: &SegmentKey) {
+        let mut guard = self.inner.lock();
+        if let Some(entry) = guard.get_mut(key) {
+            entry.finished = true;
+            if entry.segments.is_empty() {
+                guard.remove(key);
+            }
+        }
+    }
+
+    fn segment(&self, key: &SegmentKey, token: &str) -> Option<Arc<Vec<u8>>> {
+        self.inner
+            .lock()
+            .get(key)
+            .and_then(|entry| entry.segments.get(token).cloned())
+    }
+}
+
 #[derive(Default)]
 pub struct ProverServiceSVC {
     pub config: config::RuntimeConfig,
@@ -70,6 +230,73 @@ impl ProverServiceSVC {
             &config.get_proving_key_path(version.into()),
         ));
         Self { config, pipeline }
+    }
+
+    fn read_local_segment(&self, key: &SegmentKey, token: &str) -> StdResult<Vec<u8>, Status> {
+        SEGMENT_MANAGER
+            .segment(key, token)
+            .map(|bytes| (*bytes).clone())
+            .ok_or_else(|| Status::not_found("segment not found"))
+    }
+
+    async fn fetch_segment_bytes(&self, request: &ProveRequest) -> StdResult<Vec<u8>, Status> {
+        #[allow(deprecated)]
+        if request.segment_token.is_empty() {
+            return std::fs::read(&request.segment_path)
+                .map_err(|e| Status::internal(format!("read segment failed: {}", e)));
+        }
+
+        let key = SegmentKey::new(&request.proof_id, &request.segment_job_id);
+        if request.segment_provider_addr == self.config.addr {
+            return self.read_local_segment(&key, &request.segment_token);
+        }
+
+        let fetch_request = FetchSegmentRequest {
+            proof_id: request.proof_id.clone(),
+            token: request.segment_token.clone(),
+            index: request.index,
+            computed_request_id: request.segment_job_id.clone(),
+        };
+        let endpoint = format!("http://{}", request.segment_provider_addr);
+        let mut client = ProverServiceClient::connect(endpoint)
+            .await
+            .map_err(|e| Status::unavailable(format!("connect provider failed: {}", e)))?;
+        let response = client
+            .fetch_segment(Request::new(fetch_request))
+            .await
+            .map_err(|e| Status::internal(format!("fetch segment rpc failed: {}", e)))?;
+        Ok(response.into_inner().segment)
+    }
+
+    async fn release_segment_token(&self, request: &ProveRequest) {
+        if request.segment_token.is_empty() {
+            return;
+        }
+        let release_request = ReleaseSegmentRequest {
+            proof_id: request.proof_id.clone(),
+            token: request.segment_token.clone(),
+            index: request.index,
+            computed_request_id: request.segment_job_id.clone(),
+        };
+        if request.segment_provider_addr == self.config.addr {
+            if let Err(err) =
+                ProverServiceSVC::release_segment(self, Request::new(release_request)).await
+            {
+                tracing::warn!("local release segment failed: {}", err);
+            }
+        } else {
+            let endpoint = format!("http://{}", request.segment_provider_addr);
+            match ProverServiceClient::connect(endpoint).await {
+                Ok(mut client) => {
+                    if let Err(err) = client.release_segment(Request::new(release_request)).await {
+                        tracing::warn!("remote release segment failed: {}", err);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("connect provider for release failed: {}", err);
+                }
+            }
+        }
     }
 }
 
@@ -101,6 +328,9 @@ macro_rules! on_done {
 
 #[tonic::async_trait]
 impl ProverService for ProverServiceSVC {
+    type StreamSegmentsStream =
+        Pin<Box<dyn TokioStream<Item = StdResult<SegmentHandle, Status>> + Send + 'static>>;
+
     async fn get_status(
         &self,
         _request: Request<GetStatusRequest>,
@@ -125,6 +355,28 @@ impl ProverService for ProverServiceSVC {
         .await
     }
 
+    async fn stream_segments(
+        &self,
+        request: Request<StreamSegmentsRequest>,
+    ) -> tonic::Result<Response<Self::StreamSegmentsStream>, Status> {
+        metrics::record_metrics("prover::stream_segments", || async {
+            let key = SegmentKey::new(
+                &request.get_ref().proof_id,
+                &request.get_ref().computed_request_id,
+            );
+            let receiver = SEGMENT_MANAGER.subscribe(&key);
+            let stream = BroadcastStream::new(receiver).filter_map(|item| match item {
+                Ok(handle) => Some(StdResult::Ok(handle)),
+                Err(err) => {
+                    tracing::warn!("segment stream error: {}", err);
+                    None
+                }
+            });
+            Ok(Response::new(Box::pin(stream) as Self::StreamSegmentsStream))
+        })
+        .await
+    }
+
     async fn split_elf(
         &self,
         request: Request<SplitElfRequest>,
@@ -136,7 +388,14 @@ impl ProverService for ProverServiceSVC {
                 request.get_ref().computed_request_id,
             );
             let start = Instant::now();
-            let split_context = SplitContext::new(
+            let proof_id = request.get_ref().proof_id.clone();
+            let computed_request_id = request.get_ref().computed_request_id.clone();
+            let key = SegmentKey::new(&proof_id, &computed_request_id);
+            let key_arc = Arc::new(key.clone());
+            let provider_addr = self.config.addr.clone();
+            SEGMENT_MANAGER.register_job(key.clone());
+
+            let mut split_context = SplitContext::new(
                 &request.get_ref().base_dir,
                 &request.get_ref().program_id,
                 &request.get_ref().elf_path,
@@ -148,7 +407,21 @@ impl ProverService for ProverServiceSVC {
                 &request.get_ref().output_path,
                 &request.get_ref().args,
                 &request.get_ref().receipt_inputs_path,
+                &request.get_ref().computed_request_id,
             );
+
+            let callback_key = Arc::clone(&key_arc);
+            let callback_proof_id = proof_id.clone();
+            let callback_addr = provider_addr.clone();
+            split_context.segment_callback = Some(Arc::new(move |report| {
+                let mut handle = SegmentHandle::default();
+                handle.proof_id = callback_proof_id.clone();
+                handle.provider_addr = callback_addr.clone();
+                handle.token = report.token.clone();
+                handle.index = report.index as u32;
+                handle.total_segments_partial = report.generated as u32;
+                SEGMENT_MANAGER.publish(callback_key.as_ref(), handle, Arc::clone(&report.bytes));
+            }));
 
             let pipeline = self.pipeline.clone();
             let split_func = move || pipeline.split(&split_context);
@@ -178,7 +451,42 @@ impl ProverService for ProverServiceSVC {
                 response.total_steps,
                 response.total_segments
             );
+            SEGMENT_MANAGER.mark_finished(&key);
             Ok(Response::new(response))
+        })
+        .await
+    }
+
+    async fn fetch_segment(
+        &self,
+        request: Request<FetchSegmentRequest>,
+    ) -> tonic::Result<Response<FetchSegmentResponse>, Status> {
+        metrics::record_metrics("prover::fetch_segment", || async {
+            let key = SegmentKey::new(
+                &request.get_ref().proof_id,
+                &request.get_ref().computed_request_id,
+            );
+            let data = SEGMENT_MANAGER
+                .segment(&key, &request.get_ref().token)
+                .ok_or_else(|| Status::not_found("segment not found"))?;
+            Ok(Response::new(FetchSegmentResponse {
+                segment: (*data).clone(),
+            }))
+        })
+        .await
+    }
+
+    async fn release_segment(
+        &self,
+        request: Request<ReleaseSegmentRequest>,
+    ) -> tonic::Result<Response<ReleaseSegmentResponse>, Status> {
+        metrics::record_metrics("prover::release_segment", || async {
+            let key = SegmentKey::new(
+                &request.get_ref().proof_id,
+                &request.get_ref().computed_request_id,
+            );
+            SEGMENT_MANAGER.release(&key, &request.get_ref().token);
+            Ok(Response::new(ReleaseSegmentResponse {}))
         })
         .await
     }
@@ -203,18 +511,31 @@ impl ProverService for ProverServiceSVC {
                 &request.get_ref().receipts_input,
             );
             #[cfg(feature = "prover_v2")]
-            let prove_context = ProveContext {
-                proof_id: request.get_ref().proof_id.clone(),
-                program_id: request.get_ref().program_id.clone(),
-                index: request.get_ref().index as usize,
-                elf_path: request.get_ref().elf_path.clone(),
-                segment: request.get_ref().segment.clone(),
-                seg_size: request.get_ref().seg_size,
+            let (prove_context, _temp_segment_file) = {
+                let bytes = self.fetch_segment_bytes(request.get_ref()).await?;
+                let mut temp_file = NamedTempFile::new()
+                    .map_err(|e| Status::internal(format!("create temp segment failed: {}", e)))?;
+                temp_file
+                    .write_all(&bytes)
+                    .map_err(|e| Status::internal(format!("write temp segment failed: {}", e)))?;
+                let segment_path = temp_file.path().to_string_lossy().into_owned();
+                (
+                    ProveContext {
+                        proof_id: request.get_ref().proof_id.clone(),
+                        program_id: request.get_ref().program_id.clone(),
+                        index: request.get_ref().index as usize,
+                        elf_path: request.get_ref().elf_path.clone(),
+                        segment: segment_path,
+                        seg_size: request.get_ref().seg_size,
+                    },
+                    Some(temp_file),
+                )
             };
 
             let pipeline = self.pipeline.clone();
             let prove_func = move || pipeline.prove_root(&prove_context);
             let result = run_back_task(prove_func).await;
+            let is_success = result.as_ref().is_ok();
 
             let mut response = ProveResponse {
                 proof_id: request.get_ref().proof_id.clone(),
@@ -235,6 +556,10 @@ impl ProverService for ProverServiceSVC {
                 response.result.as_ref().unwrap().code,
                 elapsed.as_secs()
             );
+            #[cfg(feature = "prover_v2")]
+            if is_success {
+                self.release_segment_token(request.get_ref()).await;
+            }
             Ok(Response::new(response))
         })
         .await

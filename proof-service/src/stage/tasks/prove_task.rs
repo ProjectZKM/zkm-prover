@@ -16,6 +16,9 @@ pub struct ProveTask {
     #[serde(skip_serializing, skip_deserializing)]
     // pub segment: Vec<u8>,
     pub segment: String,
+    pub segment_provider_addr: String,
+    pub segment_token: String,
+    pub segment_job_id: String,
     #[serde(skip_serializing, skip_deserializing)]
     pub program: Program,
 

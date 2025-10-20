@@ -1,14 +1,16 @@
 use crate::proto::prover_service::v1::{
     prover_service_client::ProverServiceClient, AggregateRequest, GetTaskResultRequest,
-    GetTaskResultResponse, ProveRequest, ResultCode, SingleNodeRequest, SnarkProofRequest,
-    SplitElfRequest,
+    GetTaskResultResponse, ProveRequest, ReleaseSegmentRequest, ResultCode, SingleNodeRequest,
+    SnarkProofRequest, SplitElfRequest, StreamSegmentsRequest,
 };
+use anyhow::{anyhow, Result as AnyResult};
 use common::tls::Config as TlsConfig;
 use std::sync::{Arc, Mutex};
 
 use crate::database::Database;
 use crate::proto::includes::v1::Step;
 use crate::prover_node::{NodeStatus, ProverNode};
+use crate::stage::segment_pool::{segment_pool, SegmentDescriptor};
 use crate::stage::stage::get_timestamp;
 use crate::stage::tasks::{
     AggTask, ProveTask, SingleNodeTask, SnarkTask, SplitTask, TASK_STATE_FAILED,
@@ -18,7 +20,7 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use std::time::Duration;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, ClientTlsConfig, Uri};
 use tonic::Request;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -45,6 +47,31 @@ fn get_nodes(task_type: TaskType) -> Vec<ProverNode> {
         }
         _ => nodes_data.get_nodes(),
     }
+}
+
+async fn connect_prover_direct(
+    addr: &str,
+    tls_config: Option<TlsConfig>,
+) -> AnyResult<ProverServiceClient<Channel>> {
+    let uri = format!("grpc://{}", addr)
+        .parse::<Uri>()
+        .map_err(|e| anyhow!("invalid prover addr {}: {}", addr, e))?;
+    let mut endpoint = tonic::transport::Channel::builder(uri)
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(TASK_TIMEOUT))
+        .concurrency_limit(256);
+    if let Some(config) = tls_config {
+        let mut tls = ClientTlsConfig::new();
+        if let Some(ca_cert) = config.ca_cert.clone() {
+            tls = tls.ca_certificate(ca_cert);
+        }
+        if let Some(identity) = config.identity.clone() {
+            tls = tls.identity(identity);
+        }
+        endpoint = endpoint.tls_config(tls)?;
+    }
+    let channel = endpoint.connect().await?;
+    Ok(ProverServiceClient::new(channel))
 }
 
 async fn get_idle_client(
@@ -135,6 +162,64 @@ pub async fn split(
             }
             *count += 1;
         }
+        let pool = segment_pool();
+        let mut stream_client = client.clone();
+        let stream_request = StreamSegmentsRequest {
+            proof_id: split_task.proof_id.clone(),
+            computed_request_id: split_task.task_id.clone(),
+        };
+        let stream_pool = pool.clone();
+        let stream_proof_id = split_task.proof_id.clone();
+        let stream_task_id = split_task.task_id.clone();
+        let segment_stream = stream_client
+            .stream_segments(Request::new(stream_request))
+            .await;
+        let segment_handle = match segment_stream {
+            Ok(response) => {
+                let mut stream = response.into_inner();
+                tokio::spawn(async move {
+                    loop {
+                        match stream.message().await {
+                            Ok(Some(handle)) => {
+                                let descriptor = SegmentDescriptor {
+                                    index: handle.index,
+                                    token: handle.token.clone(),
+                                    provider_addr: handle.provider_addr.clone(),
+                                    job_id: stream_task_id.clone(),
+                                };
+                                if !stream_pool.record(&stream_proof_id, descriptor) {
+                                    tracing::debug!(
+                                        "duplicate segment handle {}:{}",
+                                        stream_proof_id,
+                                        handle.index
+                                    );
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(err) => {
+                                tracing::warn!(
+                                    "segment stream {}:{} closed with error: {}",
+                                    stream_proof_id,
+                                    stream_task_id,
+                                    err
+                                );
+                                break;
+                            }
+                        }
+                    }
+                })
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "start segment stream failed {}:{} - {}",
+                    split_task.proof_id,
+                    split_task.task_id,
+                    err
+                );
+                tokio::spawn(async {})
+            }
+        };
+
         let request = SplitElfRequest {
             proof_id: split_task.proof_id.clone(),
             computed_request_id: split_task.task_id.clone(),
@@ -170,35 +255,44 @@ pub async fn split(
             );
             *count -= 1;
         }
-        let mut status = node_status.lock().unwrap();
-        if let Ok(response) = response {
-            *status = NodeStatus::Idle;
-            if let Some(response_result) = response.get_ref().result.as_ref() {
-                split_task.state = result_code_to_state(response_result.code);
-                // FIXME: node_info usage?
-                split_task.trace.node_info = addrs.clone();
-                split_task.total_steps = response.get_ref().total_steps;
-                split_task.total_segments = response.get_ref().total_segments;
-                tracing::info!(
-                    "[split] rpc {} {}:{} code:{:?} message:{:?} end. Elapsed {:?}, {} cycles, {} segments",
-                    addrs,
-                    response.get_ref().proof_id,
-                    response.get_ref().computed_request_id,
-                    response_result.code,
-                    response_result.message,
-                    now.elapsed(),
-                    split_task.total_steps,
-                    split_task.total_segments,
-                );
-                return Some(split_task);
+        match response {
+            Ok(response) => {
+                {
+                    let mut status = node_status.lock().unwrap();
+                    *status = NodeStatus::Idle;
+                }
+                if let Some(response_result) = response.get_ref().result.as_ref() {
+                    split_task.state = result_code_to_state(response_result.code);
+                    split_task.trace.node_info = addrs.clone();
+                    split_task.total_steps = response.get_ref().total_steps;
+                    split_task.total_segments = response.get_ref().total_segments;
+                    pool.set_total(&split_task.proof_id, split_task.total_segments);
+                    tracing::info!(
+                        "[split] rpc {} {}:{} code:{:?} message:{:?} end. Elapsed {:?}, {} cycles, {} segments",
+                        addrs,
+                        response.get_ref().proof_id,
+                        response.get_ref().computed_request_id,
+                        response_result.code,
+                        response_result.message,
+                        now.elapsed(),
+                        split_task.total_steps,
+                        split_task.total_segments,
+                    );
+                }
             }
-        } else {
-            *status = NodeStatus::OffLine(get_timestamp());
-            tracing::warn!(
-                "Node {} is unreachable, marked Offline to avoid reuse",
-                addrs
-            );
+            Err(err) => {
+                {
+                    let mut status = node_status.lock().unwrap();
+                    *status = NodeStatus::OffLine(get_timestamp());
+                }
+                tracing::warn!(
+                    "Node {} is unreachable ({:?}), marked Offline to avoid reuse",
+                    addrs,
+                    err
+                );
+            }
         }
+        let _ = segment_handle.await;
     }
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     Some(split_task)
@@ -243,16 +337,24 @@ pub async fn prove(
             *status = NodeStatus::Idle;
             return Some(prove_task);
         }
+        #[allow(deprecated)]
         let request = ProveRequest {
             proof_id: prove_task.program.proof_id.clone(),
             computed_request_id: prove_task.task_id.clone(),
             program_id: prove_task.program_id.clone(),
-            segment: prove_task.segment.clone(),
+            segment_path: if prove_task.segment_token.is_empty() {
+                prove_task.segment.clone()
+            } else {
+                String::new()
+            },
             block_no: prove_task.program.block_no,
             seg_size: prove_task.program.seg_size,
             elf_path: prove_task.program.elf_path.clone(),
             receipts_input: prove_task.program.receipts.clone(),
             index: prove_task.file_no as u32,
+            segment_provider_addr: prove_task.segment_provider_addr.clone(),
+            segment_token: prove_task.segment_token.clone(),
+            segment_job_id: prove_task.segment_job_id.clone(),
         };
         tracing::info!(
             "[prove] rpc {} {}:{}:{} start",
@@ -604,4 +706,30 @@ pub async fn get_task_result(
         return Some(response.into_inner());
     }
     None
+}
+
+pub async fn release_segment_handle(
+    proof_id: &str,
+    descriptor: &SegmentDescriptor,
+    tls_config: Option<TlsConfig>,
+) -> AnyResult<()> {
+    let mut client = connect_prover_direct(&descriptor.provider_addr, tls_config).await?;
+    let request = ReleaseSegmentRequest {
+        proof_id: proof_id.to_string(),
+        computed_request_id: descriptor.job_id.clone(),
+        token: descriptor.token.clone(),
+        index: descriptor.index,
+    };
+    let mut grpc_request = Request::new(request);
+    grpc_request.set_timeout(Duration::from_secs(TASK_TIMEOUT));
+    client.release_segment(grpc_request).await.map_err(|e| {
+        anyhow!(
+            "release segment {}:{} via {} failed: {}",
+            proof_id,
+            descriptor.index,
+            descriptor.provider_addr,
+            e
+        )
+    })?;
+    Ok(())
 }

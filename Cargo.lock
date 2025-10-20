@@ -6194,6 +6194,7 @@ dependencies = [
  "lazy_static",
  "log",
  "once_cell",
+ "parking_lot",
  "plonky2",
  "prometheus",
  "prost 0.11.9",
@@ -6206,7 +6207,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "tempfile",
  "tokio",
+ "tokio-stream",
  "toml 0.5.11",
  "tonic",
  "tonic-build",
@@ -6355,6 +6358,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+ "uuid 1.18.1",
  "zkm-core-executor",
  "zkm-core-machine",
  "zkm-prover 1.2.1",
@@ -8269,6 +8273,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

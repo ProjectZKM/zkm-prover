@@ -1,15 +1,16 @@
 use crate::proto::includes::v1::Step;
 #[cfg(feature = "prover_v2")]
 use crate::stage::safe_read;
+use crate::stage::segment_pool::{segment_pool, SegmentDescriptor, SegmentPool};
 use crate::stage::tasks::{
     agg_task::AggTask, generate_task::GenerateTask, ProveTask, SingleNodeTask, SnarkTask,
     SplitTask, Trace, TASK_STATE_FAILED, TASK_STATE_INITIAL, TASK_STATE_PROCESSING,
     TASK_STATE_SUCCESS, TASK_STATE_UNPROCESSED,
 };
-use rayon::prelude::*;
 use std::{
     fmt::{Debug, Formatter},
     io::Write,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -18,7 +19,6 @@ pub fn get_timestamp() -> u64 {
     let duration_since_epoch = now.duration_since(UNIX_EPOCH).unwrap();
     duration_since_epoch.as_secs()
 }
-#[derive(Default)]
 pub struct Stage {
     pub generate_task: GenerateTask,
     pub split_task: SplitTask,
@@ -29,6 +29,24 @@ pub struct Stage {
     pub errmsg: String,
     pub step: Step,
     pub is_tasks_gen_done: bool,
+    segment_pool: Arc<SegmentPool>,
+}
+
+impl Default for Stage {
+    fn default() -> Self {
+        Stage {
+            generate_task: GenerateTask::default(),
+            split_task: SplitTask::default(),
+            prove_tasks: Vec::new(),
+            agg_tasks: Vec::new(),
+            snark_task: SnarkTask::default(),
+            is_error: false,
+            errmsg: String::new(),
+            step: Step::Init,
+            is_tasks_gen_done: false,
+            segment_pool: segment_pool(),
+        }
+    }
 }
 
 macro_rules! on_task {
@@ -111,6 +129,7 @@ impl Stage {
             is_error: false,
             errmsg: "".to_string(),
             is_tasks_gen_done: false,
+            segment_pool: segment_pool(),
         }
     }
 
@@ -246,7 +265,7 @@ impl Stage {
         on_task!(split_task, dst, self);
     }
 
-    fn task_with_no(&self, file_no: usize) -> ProveTask {
+    fn task_from_descriptor(&self, descriptor: SegmentDescriptor) -> ProveTask {
         ProveTask {
             task_id: uuid::Uuid::new_v4().to_string(),
             program_id: self.generate_task.program_id.clone(),
@@ -254,11 +273,13 @@ impl Stage {
             state: TASK_STATE_UNPROCESSED,
             trace: Trace::default(),
             base_dir: self.generate_task.base_dir.clone(),
-            file_no,
+            file_no: descriptor.index as usize,
             is_deferred: false,
-            segment: format!("{}/{file_no}", self.generate_task.seg_path),
+            segment: String::new(),
+            segment_provider_addr: descriptor.provider_addr,
+            segment_token: descriptor.token,
+            segment_job_id: descriptor.job_id,
             program: self.generate_task.gen_program(),
-            // will be assigned after the root proving
             output: vec![],
             failure_count: 0,
         }
@@ -268,45 +289,21 @@ impl Stage {
         if self.generate_task.target_step == Step::Split || self.is_tasks_gen_done {
             return;
         }
-        // Pre-allocate 64 tasks
-        if self.prove_tasks.is_empty() {
-            self.prove_tasks = (0..16)
-                .into_par_iter()
-                .map(|i| self.task_with_no(i))
-                .collect();
-        }
-        let file_numbers: usize = match std::fs::read_to_string(format!(
-            "{}/segments.txt",
-            self.generate_task.seg_path
-        )) {
-            Ok(content) => match content.trim().parse() {
-                Ok(n) => n,
-                Err(_) => return,
-            },
-            Err(_) => return,
-        };
-
-        // generate prove tasks
-        for file_no in self.prove_tasks.len()..file_numbers {
-            let task = self.task_with_no(file_no);
+        while let Some(descriptor) = self.segment_pool.acquire(&self.generate_task.proof_id) {
+            let task = self.task_from_descriptor(descriptor);
+            tracing::debug!("insert {}", task.file_no);
             self.prove_tasks.push(task);
-            tracing::debug!("insert {file_no}");
         }
+        self.prove_tasks.sort_by_key(|task| task.file_no);
     }
 
     fn gen_prove_task_post(&mut self) {
         // ensure all the prove tasks are generated
         {
-            if self.prove_tasks.len() > self.split_task.total_segments as usize {
-                self.prove_tasks
-                    .truncate(self.split_task.total_segments as usize)
-            } else {
-                let missing_tasks = (self.prove_tasks.len()
-                    ..self.split_task.total_segments as usize)
-                    .into_par_iter()
-                    .map(|i| self.task_with_no(i))
-                    .collect::<Vec<_>>();
-                self.prove_tasks.extend_from_slice(&missing_tasks);
+            if self.split_task.total_segments > 0
+                && self.prove_tasks.len() >= self.split_task.total_segments as usize
+            {
+                self.is_tasks_gen_done = true;
             }
         }
 
@@ -355,9 +352,6 @@ impl Stage {
     pub fn get_prove_task(&mut self) -> Option<ProveTask> {
         for prove_task in self.prove_tasks.iter_mut() {
             if prove_task.state == TASK_STATE_UNPROCESSED || prove_task.state == TASK_STATE_FAILED {
-                if !std::path::Path::new(&prove_task.segment).exists() {
-                    continue;
-                }
                 prove_task.state = TASK_STATE_PROCESSING;
                 prove_task.trace.start_ts = get_timestamp();
                 return Some(prove_task.clone());
@@ -376,7 +370,13 @@ impl Stage {
         // clear agg‘s child task
         if prove_task.state == TASK_STATE_SUCCESS {
             self.clear_agg_child_task(&prove_task.task_id);
+            self.segment_pool
+                .mark_success(&prove_task.proof_id, prove_task.file_no as u32);
         }
+    }
+
+    pub fn drain_segments(&self) -> Vec<SegmentDescriptor> {
+        self.segment_pool.drain(&self.generate_task.proof_id)
     }
 
     // caller guarantees prove_task is done.

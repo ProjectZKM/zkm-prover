@@ -1,6 +1,17 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone)]
+pub struct SegmentPayload {
+    pub index: usize,
+    pub token: String,
+    pub generated: usize,
+    pub bytes: Arc<Vec<u8>>,
+}
+
+pub type SegmentCallback = Arc<dyn Fn(SegmentPayload) + Send + Sync>;
+
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct SplitContext {
     pub base_dir: String,
     pub program_id: String,
@@ -14,6 +25,28 @@ pub struct SplitContext {
     pub output_path: String,
     pub args: String,
     pub receipt_inputs_path: String,
+    #[serde(skip)]
+    pub segment_callback: Option<SegmentCallback>,
+    pub job_id: String,
+}
+
+impl std::fmt::Debug for SplitContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SplitContext")
+            .field("base_dir", &self.base_dir)
+            .field("program_id", &self.program_id)
+            .field("elf_path", &self.elf_path)
+            .field("block_no", &self.block_no)
+            .field("seg_size", &self.seg_size)
+            .field("seg_path", &self.seg_path)
+            .field("public_input_path", &self.public_input_path)
+            .field("private_input_path", &self.private_input_path)
+            .field("output_path", &self.output_path)
+            .field("args", &self.args)
+            .field("receipt_inputs_path", &self.receipt_inputs_path)
+            .field("job_id", &self.job_id)
+            .finish()
+    }
 }
 
 impl SplitContext {
@@ -30,6 +63,7 @@ impl SplitContext {
         output_path: &str,
         args: &str,
         receipt_inputs_path: &str,
+        job_id: &str,
     ) -> Self {
         SplitContext {
             base_dir: basedir.to_string(),
@@ -43,6 +77,8 @@ impl SplitContext {
             output_path: output_path.to_string(),
             args: args.to_string(),
             receipt_inputs_path: receipt_inputs_path.to_string(),
+            segment_callback: None,
+            job_id: job_id.to_string(),
         }
     }
 }

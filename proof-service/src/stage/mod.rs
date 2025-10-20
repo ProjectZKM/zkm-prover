@@ -4,6 +4,7 @@ pub mod stage_service;
 mod stage_worker;
 pub mod tasks;
 pub use tasks::generate_task::GenerateTask;
+pub mod segment_pool;
 
 use crate::proto::includes::v1::BlockFileItem;
 use common::file;
