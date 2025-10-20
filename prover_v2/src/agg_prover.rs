@@ -1,5 +1,5 @@
 use crate::contexts::AggContext;
-use crate::{get_prover, NetworkProve};
+use crate::{get_prover, NetworkProve, ProverComponents};
 use zkm_core_executor::ZKMReduceProof;
 use zkm_prover::build::Witnessable;
 use zkm_prover::{InnerSC, ZKMCircuitWitness, ZKMProver, ZKMRecursionProverError};
@@ -9,7 +9,9 @@ use zkm_recursion_circuit::machine::{
 use zkm_recursion_compiler::config::InnerConfig;
 use zkm_recursion_core::Runtime;
 use zkm_sdk::ZKMProof;
-use zkm_stark::{Challenge, MachineProver, StarkGenericConfig, Val, ZKMCoreOpts};
+use zkm_stark::{
+    Challenge, MachineProver, MachineProvingKey, StarkGenericConfig, Val, ZKMCoreOpts,
+};
 
 #[derive(Default)]
 pub struct AggProver {}
@@ -69,7 +71,7 @@ impl AggProver {
 
     fn compress(
         &self,
-        prover: &ZKMProver,
+        prover: &ZKMProver<ProverComponents>,
         input: ZKMCircuitWitness,
         recursion_opts: ZKMCoreOpts,
     ) -> anyhow::Result<ZKMProof> {
