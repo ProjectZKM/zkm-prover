@@ -1,7 +1,7 @@
 use crate::proto::includes::v1::Step;
 #[cfg(feature = "prover_v2")]
 use crate::stage::safe_read;
-use crate::stage::segment_pool::{segment_pool, SegmentDescriptor, SegmentPool};
+use crate::stage::segment_pool::{self, new_segment_pool, SegmentDescriptor, SegmentPool};
 use crate::stage::tasks::{
     agg_task::AggTask, generate_task::GenerateTask, ProveTask, SingleNodeTask, SnarkTask,
     SplitTask, Trace, TASK_STATE_FAILED, TASK_STATE_INITIAL, TASK_STATE_PROCESSING,
@@ -29,7 +29,7 @@ pub struct Stage {
     pub errmsg: String,
     pub step: Step,
     pub is_tasks_gen_done: bool,
-    segment_pool: Arc<SegmentPool>,
+    segment_pool: SegmentPool,
 }
 
 impl Default for Stage {
@@ -44,7 +44,7 @@ impl Default for Stage {
             errmsg: String::new(),
             step: Step::Init,
             is_tasks_gen_done: false,
-            segment_pool: segment_pool(),
+            segment_pool: new_segment_pool(),
         }
     }
 }
@@ -129,7 +129,7 @@ impl Stage {
             is_error: false,
             errmsg: "".to_string(),
             is_tasks_gen_done: false,
-            segment_pool: segment_pool(),
+            segment_pool: new_segment_pool(),
         }
     }
 
@@ -248,6 +248,7 @@ impl Stage {
             .clone_from(&self.generate_task.output_stream_path);
         self.split_task.block_no = self.generate_task.block_no;
         self.split_task.seg_size = self.generate_task.seg_size;
+        self.split_task.segment_pool = Arc::clone(&self.segment_pool);
 
         self.split_task.task_id = uuid::Uuid::new_v4().to_string();
         self.split_task.state = TASK_STATE_UNPROCESSED;
@@ -289,7 +290,7 @@ impl Stage {
         if self.generate_task.target_step == Step::Split || self.is_tasks_gen_done {
             return;
         }
-        while let Some(descriptor) = self.segment_pool.acquire(&self.generate_task.proof_id) {
+        while let Some(descriptor) = segment_pool::acquire(&self.segment_pool) {
             let task = self.task_from_descriptor(descriptor);
             tracing::debug!("insert {}", task.file_no);
             self.prove_tasks.push(task);
@@ -370,13 +371,12 @@ impl Stage {
         // clear agg‘s child task
         if prove_task.state == TASK_STATE_SUCCESS {
             self.clear_agg_child_task(&prove_task.task_id);
-            self.segment_pool
-                .mark_success(&prove_task.proof_id, prove_task.file_no as u32);
+            segment_pool::mark_success(&self.segment_pool, prove_task.file_no as u32);
         }
     }
 
     pub fn drain_segments(&self) -> Vec<SegmentDescriptor> {
-        self.segment_pool.drain(&self.generate_task.proof_id)
+        segment_pool::drain(&self.segment_pool)
     }
 
     // caller guarantees prove_task is done.

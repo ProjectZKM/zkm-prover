@@ -1,3 +1,4 @@
+use crate::stage::segment_pool::SegmentPool;
 use crate::stage::tasks::Trace;
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,9 @@ pub struct SplitTask {
 
     #[serde(skip_serializing, skip_deserializing)]
     pub output: Vec<u8>, //void
+
+    #[serde(skip_serializing, skip_deserializing)]
+    pub segment_pool: SegmentPool,
 
     pub total_steps: u64,
     pub total_segments: u32,

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use crate::database::Database;
 use crate::proto::includes::v1::Step;
 use crate::prover_node::{NodeStatus, ProverNode};
-use crate::stage::segment_pool::{segment_pool, SegmentDescriptor};
+use crate::stage::segment_pool::{self, SegmentDescriptor};
 use crate::stage::stage::get_timestamp;
 use crate::stage::tasks::{
     AggTask, ProveTask, SingleNodeTask, SnarkTask, SplitTask, TASK_STATE_FAILED,
@@ -143,7 +143,7 @@ pub async fn split(
             return Some(split_task);
         }
     }
-    let client = get_idle_client(tls_config, TaskType::Split).await;
+    let client = get_idle_client(tls_config.clone(), TaskType::Split).await;
     if let Some((addrs, mut client, node_status)) = client {
         {
             // after getting an idle client, we can check the current prover number again
@@ -162,7 +162,7 @@ pub async fn split(
             }
             *count += 1;
         }
-        let pool = segment_pool();
+        let pool = split_task.segment_pool.clone();
         let mut stream_client = client.clone();
         let stream_request = StreamSegmentsRequest {
             proof_id: split_task.proof_id.clone(),
@@ -187,7 +187,7 @@ pub async fn split(
                                     provider_addr: handle.provider_addr.clone(),
                                     job_id: stream_task_id.clone(),
                                 };
-                                if !stream_pool.record(&stream_proof_id, descriptor) {
+                                if !segment_pool::record(&stream_pool, descriptor) {
                                     tracing::debug!(
                                         "duplicate segment handle {}:{}",
                                         stream_proof_id,
@@ -266,7 +266,7 @@ pub async fn split(
                     split_task.trace.node_info = addrs.clone();
                     split_task.total_steps = response.get_ref().total_steps;
                     split_task.total_segments = response.get_ref().total_segments;
-                    pool.set_total(&split_task.proof_id, split_task.total_segments);
+                    segment_pool::set_total(&pool, split_task.total_segments);
                     tracing::info!(
                         "[split] rpc {} {}:{} code:{:?} message:{:?} end. Elapsed {:?}, {} cycles, {} segments",
                         addrs,

@@ -1,8 +1,6 @@
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-
-use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 
 #[derive(Debug, Clone, Default)]
 pub struct SegmentDescriptor {
@@ -12,8 +10,8 @@ pub struct SegmentDescriptor {
     pub job_id: String,
 }
 
-#[derive(Default)]
-struct ProofSegments {
+#[derive(Default, Debug)]
+pub struct ProofSegments {
     pending: VecDeque<SegmentDescriptor>,
     in_flight: HashMap<u32, SegmentDescriptor>,
     completed: HashSet<u32>,
@@ -64,71 +62,43 @@ impl ProofSegments {
     }
 }
 
-#[derive(Default)]
-pub struct SegmentPool {
-    inner: Mutex<HashMap<String, ProofSegments>>,
+pub type SegmentPool = Arc<Mutex<ProofSegments>>;
+
+pub fn new_segment_pool() -> SegmentPool {
+    Arc::new(Mutex::new(ProofSegments::default()))
 }
 
-impl SegmentPool {
-    pub fn record(&self, proof_id: &str, descriptor: SegmentDescriptor) -> bool {
-        let mut guard = self.inner.lock();
-        let entry = guard.entry(proof_id.to_string()).or_default();
-        entry.record(descriptor)
-    }
-
-    pub fn acquire(&self, proof_id: &str) -> Option<SegmentDescriptor> {
-        let mut guard = self.inner.lock();
-        guard.get_mut(proof_id).and_then(ProofSegments::acquire)
-    }
-
-    pub fn mark_success(&self, proof_id: &str, index: u32) {
-        if let Some(entry) = self.inner.lock().get_mut(proof_id) {
-            entry.mark_success(index);
-        }
-    }
-
-    pub fn mark_failure(&self, proof_id: &str, index: u32) {
-        if let Some(entry) = self.inner.lock().get_mut(proof_id) {
-            entry.mark_failure(index);
-        }
-    }
-
-    pub fn set_total(&self, proof_id: &str, total: u32) {
-        let mut guard = self.inner.lock();
-        guard
-            .entry(proof_id.to_string())
-            .or_default()
-            .set_total(total);
-    }
-
-    pub fn is_drained(&self, proof_id: &str) -> bool {
-        self.inner
-            .lock()
-            .get(proof_id)
-            .map(ProofSegments::is_drained)
-            .unwrap_or(false)
-    }
-
-    pub fn clear(&self, proof_id: &str) {
-        self.inner.lock().remove(proof_id);
-    }
-
-    pub fn drain(&self, proof_id: &str) -> Vec<SegmentDescriptor> {
-        let mut guard = self.inner.lock();
-        if let Some(entry) = guard.remove(proof_id) {
-            let mut descriptors: Vec<SegmentDescriptor> = entry.pending.into_iter().collect();
-            descriptors.extend(entry.in_flight.into_values());
-            descriptors
-        } else {
-            Vec::new()
-        }
-    }
+pub fn record(pool: &SegmentPool, descriptor: SegmentDescriptor) -> bool {
+    pool.lock().record(descriptor)
 }
 
-static GLOBAL_SEGMENT_POOL: Lazy<Arc<SegmentPool>> = Lazy::new(|| Arc::new(SegmentPool::default()));
+pub fn acquire(pool: &SegmentPool) -> Option<SegmentDescriptor> {
+    pool.lock().acquire()
+}
 
-pub fn segment_pool() -> Arc<SegmentPool> {
-    GLOBAL_SEGMENT_POOL.clone()
+pub fn mark_success(pool: &SegmentPool, index: u32) {
+    pool.lock().mark_success(index);
+}
+
+pub fn mark_failure(pool: &SegmentPool, index: u32) {
+    pool.lock().mark_failure(index);
+}
+
+pub fn set_total(pool: &SegmentPool, total: u32) {
+    pool.lock().set_total(total);
+}
+
+pub fn is_drained(pool: &SegmentPool) -> bool {
+    pool.lock().is_drained()
+}
+
+pub fn drain(pool: &SegmentPool) -> Vec<SegmentDescriptor> {
+    let mut guard = pool.lock();
+    let mut descriptors: Vec<SegmentDescriptor> = guard.pending.drain(..).collect();
+    descriptors.extend(guard.in_flight.drain().map(|(_, v)| v));
+    guard.completed.clear();
+    guard.total_expected = None;
+    descriptors
 }
 
 #[cfg(test)]
@@ -137,26 +107,26 @@ mod tests {
 
     #[test]
     fn segment_lifecycle() {
-        let pool = SegmentPool::default();
+        let pool = new_segment_pool();
         let descriptor = SegmentDescriptor {
             index: 1,
             token: "1".to_string(),
             provider_addr: "127.0.0.1:1".to_string(),
             job_id: "job".to_string(),
         };
-        assert!(pool.record("proof", descriptor.clone()));
-        assert!(!pool.record("proof", descriptor.clone()));
-        let acquired = pool.acquire("proof").unwrap();
+        assert!(record(&pool, descriptor.clone()));
+        assert!(!record(&pool, descriptor.clone()));
+        let acquired = acquire(&pool).unwrap();
         assert_eq!(acquired.index, 1);
-        pool.mark_failure("proof", 1);
-        let acquired_retry = pool.acquire("proof").unwrap();
+        mark_failure(&pool, 1);
+        let acquired_retry = acquire(&pool).unwrap();
         assert_eq!(acquired_retry.index, 1);
-        pool.mark_success("proof", 1);
-        pool.set_total("proof", 1);
-        assert!(pool.is_drained("proof"));
-        let drained = pool.drain("proof");
+        mark_success(&pool, 1);
+        set_total(&pool, 1);
+        assert!(is_drained(&pool));
+        let drained = drain(&pool);
         assert!(drained.is_empty());
-        assert!(pool.acquire("proof").is_none());
+        assert!(acquire(&pool).is_none());
 
         // pending descriptors are returned by drain
         let descriptor = SegmentDescriptor {
@@ -165,8 +135,8 @@ mod tests {
             provider_addr: "127.0.0.1:2".to_string(),
             job_id: "job".to_string(),
         };
-        assert!(pool.record("proof2", descriptor.clone()));
-        let drained_pending = pool.drain("proof2");
+        assert!(record(&pool, descriptor.clone()));
+        let drained_pending = drain(&pool);
         assert_eq!(drained_pending.len(), 1);
         assert_eq!(drained_pending[0].token, descriptor.token);
     }
