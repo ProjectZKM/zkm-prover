@@ -121,7 +121,7 @@ impl StageService for StageServiceSVC {
                             (
                                 context.target_step,
                                 context.composite_proof,
-                                context.snark_path,
+                                context.proof_path,
                             )
                         }
                         Err(_) => (Step::Snark, false, "".into()),
@@ -142,7 +142,7 @@ impl StageService for StageServiceSVC {
                         #[cfg(feature = "prover")]
                         if target_step == Step::Snark {
                             response.snark_proof_url = format!(
-                                "{}/{}/snark/proof_with_public_inputs.json",
+                                "{}/{}/proof_with_public_inputs.json",
                                 fileserver_url,
                                 request.get_ref().proof_id
                             );
@@ -157,7 +157,7 @@ impl StageService for StageServiceSVC {
                         #[cfg(feature = "prover_v2")]
                         let suffix = "bin";
                         response.public_values_url = format!(
-                            "{}/{}/wrap/public_values.{}",
+                            "{}/{}/public_values.{}",
                             fileserver_url,
                             request.get_ref().proof_id,
                             suffix
@@ -498,11 +498,11 @@ impl StageService for StageServiceSVC {
                     .map_err(|e| Status::internal(e.to_string()))?;
             }
 
-            let snark_dir = format!("{}/snark", dir_path);
-            file::new(&snark_dir)
-                .create_dir_all()
-                .map_err(|e| Status::internal(e.to_string()))?;
-            let snark_path = format!("{}/proof_with_public_inputs.json", snark_dir);
+            // let snark_dir = format!("{}/snark", dir_path);
+            // file::new(&snark_dir)
+            //     .create_dir_all()
+            //     .map_err(|e| Status::internal(e.to_string()))?;
+            let proof_path = format!("{}/proof_with_public_inputs.json", dir_path);
 
             let prover_version = if cfg!(feature = "prover") {
                 ProverVersion::Zkm
@@ -521,7 +521,7 @@ impl StageService for StageServiceSVC {
                 &seg_path,
                 &prove_path,
                 &agg_path,
-                &snark_path,
+                &proof_path,
                 &public_input_stream_path,
                 &private_input_stream_path,
                 &output_stream_path,
@@ -571,7 +571,7 @@ impl StageService for StageServiceSVC {
             if let Some(fileserver_url) = &self.config.fileserver_url {
                 if target_step == Step::Snark {
                     snark_proof_url = format!(
-                        "{}/{}/snark/proof_with_public_inputs.json",
+                        "{}/{}/proof_with_public_inputs.json",
                         fileserver_url,
                         request.get_ref().proof_id
                     );

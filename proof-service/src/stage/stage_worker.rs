@@ -298,7 +298,7 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                 }
 
                 let result = if stage.is_success() && generate_context.target_step == Step::Snark {
-                    file::new(&generate_context.snark_path)
+                    file::new(&generate_context.proof_path)
                         .read()
                         .unwrap_or_default()
                 } else {

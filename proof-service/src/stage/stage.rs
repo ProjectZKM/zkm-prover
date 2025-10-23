@@ -1,6 +1,4 @@
 use crate::proto::includes::v1::Step;
-#[cfg(feature = "prover_v2")]
-use crate::stage::safe_read;
 use crate::stage::segment_pool::{self, new_segment_pool, SegmentDescriptor, SegmentPool};
 use crate::stage::tasks::{
     agg_task::AggTask, generate_task::GenerateTask, ProveTask, SingleNodeTask, SnarkTask,
@@ -263,6 +261,9 @@ impl Stage {
         let dst = &mut self.split_task;
         dst.total_steps = split_task.total_steps;
         dst.total_segments = split_task.total_segments;
+        // public values have been saved to disk, no need to keep in memory
+        // dst.public_values = split_task.public_values.clone();
+        dst.deferred_inputs = split_task.deferred_inputs.clone();
         on_task!(split_task, dst, self);
     }
 
@@ -310,30 +311,22 @@ impl Stage {
 
         #[cfg(feature = "prover_v2")]
         {
-            let files = common::file::new(&self.generate_task.seg_path)
-                .read_dir()
-                .unwrap();
-            let mut deferred_files: Vec<(usize, String)> = Vec::new();
-            for file_name in files {
-                if let Some(name) = file_name.strip_prefix("deferred_proof_") {
-                    if let Ok(num) = name.parse::<usize>() {
-                        deferred_files.push((num, file_name));
-                    }
-                }
-            }
-            deferred_files.sort_by_key(|(n, _)| *n);
-            tracing::info!("Generate {} deferred proofs", deferred_files.len());
+            tracing::info!(
+                "Generate {} deferred proofs",
+                self.split_task.deferred_inputs.len()
+            );
 
-            for (file_no, file_name) in deferred_files.into_iter() {
+            let start_file_no = self.prove_tasks.len();
+            for (i, deferred_inputs) in self.split_task.deferred_inputs.clone().iter().enumerate() {
                 let prove_task = ProveTask {
                     task_id: uuid::Uuid::new_v4().to_string(),
                     proof_id: self.generate_task.proof_id.clone(),
                     state: TASK_STATE_SUCCESS,
                     base_dir: self.generate_task.base_dir.clone(),
-                    file_no,
+                    file_no: start_file_no + i,
                     is_deferred: true,
                     program: self.generate_task.gen_program(),
-                    output: safe_read(&format!("{}/{file_name}", self.generate_task.seg_path)),
+                    output: deferred_inputs.clone(),
                     ..Default::default()
                 };
                 self.prove_tasks.push(prove_task);
@@ -562,9 +555,8 @@ impl Stage {
 
             // write final agg task output
             if agg_task.is_final && self.generate_task.target_step == Step::Agg {
-                // Here we also use snark_path to store agg proof ;
-                let mut f = std::fs::File::create(&self.generate_task.snark_path)
-                    .unwrap_or_else(|_| panic!("can not open {}", &self.generate_task.snark_path));
+                let mut f = std::fs::File::create(&self.generate_task.proof_path)
+                    .unwrap_or_else(|_| panic!("can not open {}", &self.generate_task.proof_path));
                 f.write_all(&agg_task.output).unwrap();
             }
         }
@@ -580,7 +572,7 @@ impl Stage {
             .clone_from(&self.generate_task.agg_path);
         self.snark_task
             .output_path
-            .clone_from(&self.generate_task.snark_path);
+            .clone_from(&self.generate_task.proof_path);
         self.snark_task.task_id = uuid::Uuid::new_v4().to_string();
         self.snark_task.state = TASK_STATE_UNPROCESSED;
         // fill in the input receipts
@@ -626,8 +618,8 @@ impl Stage {
         let dst = &mut self.snark_task;
         // write snark proof to disk
         // TODO: handle the result gracefully
-        let mut f = std::fs::File::create(&self.generate_task.snark_path)
-            .unwrap_or_else(|_| panic!("can not open {}", &self.generate_task.snark_path));
+        let mut f = std::fs::File::create(&self.generate_task.proof_path)
+            .unwrap_or_else(|_| panic!("can not open {}", &self.generate_task.proof_path));
         f.write_all(&snark_task.output).unwrap();
         on_task!(snark_task, dst, self);
     }
@@ -654,9 +646,8 @@ impl Stage {
                 single_node_task.output.len()
             );
             if self.generate_task.target_step == Step::Agg {
-                // Here we also use snark_path to store agg proof ;
-                let mut f = std::fs::File::create(&self.generate_task.snark_path)
-                    .unwrap_or_else(|_| panic!("can not open {}", &self.generate_task.snark_path));
+                let mut f = std::fs::File::create(&self.generate_task.proof_path)
+                    .unwrap_or_else(|_| panic!("can not open {}", &self.generate_task.proof_path));
                 f.write_all(&single_node_task.output).unwrap();
             }
             self.step = Step::End;

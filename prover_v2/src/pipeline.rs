@@ -1,5 +1,7 @@
 use crate::agg_prover::AggProver;
-use crate::contexts::{AggContext, ProveContext, SingleNodeContext, SnarkContext, SplitContext};
+use crate::contexts::{
+    AggContext, ProveContext, SingleNodeContext, SnarkContext, SplitContext, SplitResult,
+};
 use crate::executor::Executor;
 use crate::root_prover::RootProver;
 use crate::single_node_prover::SingleNodeProver;
@@ -25,10 +27,14 @@ impl Pipeline {
         }
     }
 
-    pub fn split(&self, split_context: &SplitContext) -> Result<(bool, u64, u32), String> {
+    pub fn split(
+        &self,
+        split_context: &SplitContext,
+        // ) -> Result<(bool, u64, u32, Vec<u8>, Vec<Vec<u8>>), String> {
+    ) -> Result<(bool, SplitResult), String> {
         self.executor
             .split(split_context)
-            .map(|(step, segments)| (true, step, segments))
+            .map(|split_result| (true, split_result))
             .map_err(|e| {
                 tracing::error!("split error {:#?}", e);
                 e.to_string()
@@ -65,10 +71,10 @@ impl Pipeline {
     pub fn prove_single_node(
         &self,
         single_node_context: &SingleNodeContext,
-    ) -> Result<(bool, u64, Vec<u8>), String> {
+    ) -> Result<(bool, u64, Vec<u8>, Vec<u8>), String> {
         self.single_node_prover
             .prove(single_node_context)
-            .map(|(cycles, output)| (true, cycles, output))
+            .map(|(cycles, output, pv)| (true, cycles, output, pv))
             .map_err(|e| {
                 tracing::error!("prove_single_node error {:#?}", e);
                 e.to_string()

@@ -83,6 +83,14 @@ impl SplitContext {
     }
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SplitResult {
+    pub total_steps: u64,
+    pub total_segments: u32,
+    pub public_values: Vec<u8>,
+    pub deferred_inputs: Vec<Vec<u8>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ProveContext {
     pub proof_id: String,

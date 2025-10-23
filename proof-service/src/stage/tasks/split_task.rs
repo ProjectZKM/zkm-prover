@@ -29,4 +29,8 @@ pub struct SplitTask {
 
     pub total_steps: u64,
     pub total_segments: u32,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub public_values: Vec<u8>,
+    #[serde(skip_serializing, skip_deserializing)]
+    pub deferred_inputs: Vec<Vec<u8>>,
 }

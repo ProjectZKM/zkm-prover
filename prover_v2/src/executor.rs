@@ -28,6 +28,7 @@ use zkm_stark::{
 };
 
 pub use crate::contexts::SplitContext;
+use crate::contexts::SplitResult;
 use crate::{
     get_prover, NetworkProve, Segment, StateWithPublicValues, FIRST_LAYER_BATCH_SIZE, KEY_CACHE,
     PROGRAM_CACHE,
@@ -36,7 +37,7 @@ use crate::{
 #[derive(Default)]
 pub struct Executor {}
 impl Executor {
-    pub fn split(&self, ctx: &SplitContext) -> anyhow::Result<(u64, u32)> {
+    pub fn split(&self, ctx: &SplitContext) -> anyhow::Result<SplitResult> {
         let prover = get_prover();
         let mut network_prove = NetworkProve::new(ctx.seg_size);
 
@@ -88,7 +89,8 @@ impl Executor {
         file::new(&format!("{}/vk.bin", ctx.base_dir)).write_all(&vk_bytes)?;
 
         let context = network_prove.context_builder.build();
-        let (total_steps, total_segments, public_values_stream) = self.split_with_context(
+
+        self.split_with_context(
             &prover,
             ctx,
             program,
@@ -97,13 +99,7 @@ impl Executor {
             network_prove.opts.core_opts,
             context,
             prover.core_shape_config.as_ref(),
-        )?;
-        // write public_values_stream
-        // file::new(&ctx.output_path).write(&public_values_stream)?;
-        let public_values_path = format!("{}/wrap/public_values.bin", ctx.base_dir);
-        file::new(&public_values_path).write_all(&public_values_stream)?;
-
-        Ok((total_steps, total_segments))
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -117,7 +113,7 @@ impl Executor {
         opts: ZKMCoreOpts,
         mut context: ZKMContext<'a>,
         shape_config: Option<&CoreShapeConfig<<CoreSC as StarkGenericConfig>::Val>>,
-    ) -> anyhow::Result<(u64, u32, Vec<u8>)> {
+    ) -> anyhow::Result<SplitResult> {
         context.subproof_verifier = Some(prover as &dyn SubproofVerifier);
         // Setup the runtime.
         let mut runtime = Runtime::with_context(program.clone(), opts, context);
@@ -205,8 +201,9 @@ impl Executor {
 
                 let span = tracing::Span::current().clone();
 
-                let handle = s.spawn(move || {
+                let handle = s.spawn(move || -> Option<Vec<Vec<u8>>> {
                     let _span = span.enter();
+                    let mut thread_deferred_inputs = None;
                     tracing::debug_span!("phase 2 trace generation").in_scope(|| {
                         loop {
                             // Receive the latest checkpoint.
@@ -358,37 +355,37 @@ impl Executor {
                                         FIRST_LAYER_BATCH_SIZE,
                                     );
 
-                                    deferred_inputs.par_iter().enumerate().for_each(
-                                        |(i, deferred_input)| {
-                                            let encoded_proof =
-                                                bincode::serialize(&deferred_input).unwrap();
-                                            // Start numbering from 2^16.
-                                            file::new(&format!(
-                                                "{}/deferred_proof_{}",
-                                                ctx.seg_path,
-                                                (1 << 16) | i
-                                            ))
-                                            .write_all(&encoded_proof)
-                                            .expect("Failed to write deferred proof");
-                                        },
+                                    thread_deferred_inputs = Some(
+                                        deferred_inputs
+                                            .par_iter()
+                                            .map(|d| bincode::serialize(d).unwrap())
+                                            .collect(),
                                     );
                                 }
                             } else {
                                 break;
                             }
                         }
-                    })
+                    });
+                    thread_deferred_inputs
                 });
                 p2_record_and_trace_gen_handles.push(handle);
             }
             // Wait until the checkpoint generator handle has fully finished.
-            let public_values_stream = checkpoint_generator_handle.join().unwrap().unwrap();
-            // file::new(&ctx.public_input_path).write(&public_values_stream)?;                    // write public_values_stream
+            let public_values_stream = checkpoint_generator_handle
+                .join()
+                .unwrap()
+                .map_err(|e| anyhow::anyhow!("Checkpoint generator failed: {}", e))?;
 
+            let mut deferred_inputs = Vec::new();
             // Wait until the records and traces have been fully generated for phase 2.
             p2_record_and_trace_gen_handles
                 .into_iter()
-                .for_each(|handle| handle.join().unwrap());
+                .for_each(|handle| {
+                    if let Some(result) = handle.join().unwrap() {
+                        deferred_inputs = result;
+                    }
+                });
             let total_segments = {
                 let segment_index = segment_index.lock().unwrap();
                 *segment_index
@@ -436,7 +433,12 @@ impl Executor {
                 cycles as f64 / (split_time * 1000.0),
             );
 
-            Ok((cycles, total_segments as u32, public_values_stream))
+            Ok(SplitResult {
+                total_steps: cycles,
+                total_segments: total_segments as u32,
+                public_values: public_values_stream,
+                deferred_inputs,
+            })
         })
     }
 }

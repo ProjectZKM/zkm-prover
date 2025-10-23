@@ -430,13 +430,15 @@ impl ProverService for ProverServiceSVC {
             let mut response = SplitElfResponse {
                 proof_id: request.get_ref().proof_id.clone(),
                 computed_request_id: request.get_ref().computed_request_id.clone(),
-                total_steps: result.clone().unwrap_or_default().1,
-                total_segments: result.clone().unwrap_or_default().2,
+                total_steps: result.clone().unwrap_or_default().1.total_steps,
+                total_segments: result.clone().unwrap_or_default().1.total_segments,
+                public_values: result.clone().unwrap_or_default().1.public_values,
+                deferred_inputs: result.clone().unwrap_or_default().1.deferred_inputs,
                 ..Default::default()
             };
             // True if and only if no error occurs and ELF size > 0
             let result: std::result::Result<(bool, Vec<u8>), String> = match result {
-                Ok(cycle) => Ok((cycle.1 > 0 && cycle.0, vec![])),
+                Ok(cycle) => Ok((cycle.1.total_steps > 0 && cycle.0, vec![])),
                 Err(e) => Err(e),
             };
             on_done!(result, response);
@@ -711,7 +713,11 @@ impl ProverService for ProverServiceSVC {
                 computed_request_id: request.get_ref().computed_request_id.clone(),
                 total_steps: result.clone().unwrap_or_default().1,
                 output: match &result {
-                    Ok((_, _, x)) => x.clone(),
+                    Ok((_, _, x, _)) => x.clone(),
+                    _ => vec![],
+                },
+                public_values: match &result {
+                    Ok((_, _, _, x)) => x.clone(),
                     _ => vec![],
                 },
                 ..Default::default()

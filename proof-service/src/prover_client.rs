@@ -266,7 +266,20 @@ pub async fn split(
                     split_task.trace.node_info = addrs.clone();
                     split_task.total_steps = response.get_ref().total_steps;
                     split_task.total_segments = response.get_ref().total_segments;
+                    // split_task.public_values = response.get_ref().public_values;
+                    split_task.deferred_inputs = response.get_ref().deferred_inputs.clone();
                     segment_pool::set_total(&pool, split_task.total_segments);
+
+                    // write public values to file
+                    #[cfg(feature = "prover_v2")]
+                    {
+                        let public_values_path =
+                            format!("{}/public_values.bin", split_task.base_dir);
+                        common::file::new(&public_values_path)
+                            .write_all(&response.get_ref().public_values)
+                            .unwrap_or_default();
+                    }
+
                     tracing::info!(
                         "[split] rpc {} {}:{} code:{:?} message:{:?} end. Elapsed {:?}, {} cycles, {} segments",
                         addrs,
@@ -643,6 +656,14 @@ pub async fn single_node(
                     single_node_task.trace.node_info = addrs.clone();
                     single_node_task.total_cycles = response.get_ref().total_steps;
                     single_node_task.output = response.get_ref().output.clone();
+
+                    // write public values to file
+                    let public_values_path =
+                        format!("{}/public_values.bin", single_node_task.base_dir);
+                    common::file::new(&public_values_path)
+                        .write_all(&response.get_ref().public_values)
+                        .unwrap_or_default();
+
                     tracing::info!(
                         "[single node] rpc {} {}:{} code:{:?} message:{:?} end. Elapsed {:?}",
                         addrs,

@@ -88,6 +88,8 @@ message SplitElfResponse {
   Result result = 3;
   uint64 total_steps = 4;
   uint32 total_segments = 5;
+  bytes public_values = 6;
+  repeated bytes deferred_inputs = 7;
 }
 
 message SegmentHandle {
@@ -200,4 +202,6 @@ message SingleNodeResponse {
   string computed_request_id = 2;
   bytes output = 3;
   uint64 total_steps = 4;
-  Result result = 5;}
+  Result result = 5;
+  bytes public_values = 6;
+}
