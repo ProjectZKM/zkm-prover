@@ -1,20 +1,38 @@
 use std::fs::File;
+use std::io::{self, Write};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use memmap2::{Advice, Mmap, MmapMut, MmapOptions};
 use rayon::prelude::*;
 
 use zkm_core_executor::ExecutionRecord;
 
-use rkyv::{archived_root, util::to_bytes, Deserialize};
 use rkyv::de::deserializers::SharedDeserializeMap;
+use rkyv::ser::serializers::{
+    AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch, SharedSerializeMap,
+    WriteSerializer,
+};
+use rkyv::ser::Serializer;
+use rkyv::{archived_root, Deserialize};
+
+const SCRATCH_MAIN_BYTES: usize = 4 * 1024 * 1024;
+
+type DefaultScratch = FallbackScratch<HeapScratch<SCRATCH_MAIN_BYTES>, AllocScratch>;
+type DefaultSerializer<W> =
+    CompositeSerializer<WriteSerializer<W>, DefaultScratch, SharedSerializeMap>;
+
+fn new_serializer<W: io::Write>(writer: W) -> DefaultSerializer<W> {
+    CompositeSerializer::new(
+        WriteSerializer::new(writer),
+        DefaultScratch::default(),
+        SharedSerializeMap::default(),
+    )
+}
 
 pub fn write_record_mmap_rkyv(path: &Path, record: &ExecutionRecord) -> Result<()> {
-    // 1) Serialize into an AlignedVec (temporary buffer only)
-    let bytes = to_bytes::<_, 1024>(record).context("rkyv to_bytes")?;
+    let serialized_len = measure_serialized_size(record)?;
 
-    // 2) Create a temp file in the same directory
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = tempfile::Builder::new()
         .prefix(".rkyv-")
@@ -22,18 +40,18 @@ pub fn write_record_mmap_rkyv(path: &Path, record: &ExecutionRecord) -> Result<(
         .context("create tempfile")?;
     let file: &File = tmp.as_file();
 
-    // 3) Pre-allocate to avoid SIGBUS on mmap write
-    file.set_len(bytes.len() as u64)
+    file.set_len(serialized_len as u64)
         .context("set_len for mmap file")?;
 
-    // 4) Writable mapping -> single copy -> async flush
-    let mut mmap = unsafe { MmapOptions::new().map_mut(file) }.context("mmap_mut")?;
+    let mut mmap =
+        unsafe { MmapOptions::new().len(serialized_len).map_mut(file) }.context("mmap_mut")?;
     let _ = mmap.advise(Advice::Sequential);
-    mmap[..].copy_from_slice(&bytes);
+
+    serialize_record_into_mmap(record, &mut mmap)?;
+
     let _ = mmap.flush_async();
     drop(mmap);
 
-    // 5) Atomic replace: prefer persist, fallback to manual rename
     match tmp.persist(path) {
         Ok(_f) => {}
         Err(e) => {
@@ -56,7 +74,9 @@ pub fn write_records_parallel_mmap_rkyv(
             let idx = base_index + k;
             let path = seg_dir.join(idx.to_string());
             write_record_mmap_rkyv(&path, &records[k])
-        })
+        })?;
+
+    Ok(())
 }
 
 /// Holder for a read-only mmap and zero-copy archived access.
@@ -93,4 +113,82 @@ pub fn read_record_owned_mmap_rkyv(path: &Path) -> Result<ExecutionRecord> {
         .deserialize(&mut deserializer)
         .context("rkyv deserialize")?;
     Ok(record)
+}
+
+fn serialize_record_into_mmap(record: &ExecutionRecord, mmap: &mut MmapMut) -> Result<()> {
+    let writer = MmapWriter::new(mmap);
+    let mut serializer = new_serializer(writer);
+    serializer
+        .serialize_value(record)
+        .context("rkyv serialize into mmap")?;
+    let writer = serializer.into_serializer().into_inner();
+    writer.finish()
+}
+
+fn measure_serialized_size(record: &ExecutionRecord) -> Result<usize> {
+    let writer = CountingWriter::default();
+    let mut serializer = new_serializer(writer);
+    serializer
+        .serialize_value(record)
+        .context("rkyv measure serialized size")?;
+    Ok(serializer.pos())
+}
+
+#[derive(Default)]
+struct CountingWriter {
+    pos: usize,
+}
+
+impl io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.pos += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct MmapWriter<'a> {
+    buffer: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> MmapWriter<'a> {
+    fn new(mmap: &'a mut MmapMut) -> Self {
+        Self {
+            buffer: &mut mmap[..],
+            pos: 0,
+        }
+    }
+
+    fn finish(self) -> Result<()> {
+        ensure!(
+            self.pos == self.buffer.len(),
+            "serialized length {} did not fill mmap {}",
+            self.pos,
+            self.buffer.len()
+        );
+        Ok(())
+    }
+}
+
+impl<'a> io::Write for MmapWriter<'a> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let end = self.pos + buf.len();
+        if end > self.buffer.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "mmap writer overflow",
+            ));
+        }
+        self.buffer[self.pos..end].copy_from_slice(buf);
+        self.pos = end;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
