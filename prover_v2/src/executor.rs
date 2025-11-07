@@ -28,9 +28,9 @@ use zkm_stark::{
 
 pub use crate::contexts::SplitContext;
 use crate::{
-    get_prover, NetworkProve, ProverComponents, Segment, StateWithPublicValues,
-    FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE,
+    get_prover, NetworkProve, ProverComponents, FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE,
 };
+use crate::rkyv_io::write_records_parallel_mmap_rkyv;
 
 #[derive(Default)]
 pub struct Executor {}
@@ -284,6 +284,7 @@ impl Executor {
                                     state.start_pc = state.next_pc;
                                     record.public_values = *state;
                                 }
+                                records.append(&mut deferred);
 
                                 let mut segment_index = segment_index.lock().unwrap();
                                 let base_index = *segment_index;
@@ -298,47 +299,24 @@ impl Executor {
                                 // Let another worker update the state.
                                 record_gen_sync.advance_turn();
 
-                                let segments: Vec<_> = std::iter::once(Segment::State(Box::new(
-                                    StateWithPublicValues {
-                                        state: exe_state,
-                                        public_values: records[0].public_values,
-                                    },
-                                )))
-                                .chain(deferred.into_iter().map(|r| Segment::Record(Box::new(r))))
-                                .collect();
-
-                                segments.par_iter().enumerate().for_each(|(i, segment)| {
-                                    let now = Instant::now();
-                                    let encoded_segment = bincode::serialize(&segment).unwrap();
-                                    // use zstd to compress, level = 2 or 3
-                                    let compressed_segment =
-                                        zstd::stream::encode_all(&*encoded_segment, 2)
-                                            .expect("zstd compress failed");
-                                    write_file(
-                                        format!("{}/{}", ctx.seg_path, base_index + i),
-                                        &compressed_segment,
-                                    )
-                                    .expect("Failed to write segment");
-
-                                    tracing::info!(
-                                        "Wrote record {} in {:?}",
-                                        base_index + i,
-                                        now.elapsed()
-                                    );
-                                });
+                                let segment_write_start = Instant::now();
+                                write_records_parallel_mmap_rkyv(
+                                    &records,
+                                    std::path::Path::new(&ctx.seg_path),
+                                    base_index,
+                                )
+                                .expect("Failed to write segments via mmap");
+                                tracing::info!(
+                                    "Wrote {} records [{}..{}) in {:?}",
+                                    records.len(),
+                                    base_index,
+                                    base_index + records.len(),
+                                    segment_write_start.elapsed()
+                                );
 
                                 // process deferred proofs
                                 if done && !stdin.proofs.is_empty() {
-                                    let last_record = if segments.len() == 1 {
-                                        records.last().unwrap()
-                                    } else {
-                                        let last_segment = segments.last().unwrap();
-                                        match last_segment {
-                                            Segment::Record(record) => record,
-                                            _ => unreachable!("last segment should be a record"),
-                                        }
-                                    };
-                                    let last_pv = last_record.public_values();
+                                    let last_pv = records.last().unwrap().public_values();
                                     let last_proof_pv = last_pv.as_slice().borrow();
                                     let deferred_proofs = stdin
                                         .proofs
@@ -439,7 +417,6 @@ fn write_file(path: String, buf: &[u8]) -> anyhow::Result<()> {
     let tmp_path = format!("{path}.tmp");
     let mut file = File::create(&tmp_path)?;
     file.write_all(buf)?;
-    file.sync_all()?;
     std::fs::rename(tmp_path, path)?;
 
     Ok(())
