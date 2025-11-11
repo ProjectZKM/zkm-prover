@@ -25,8 +25,8 @@ zkm-sdk = { git = "https://github.com/ProjectZKM/Ziren" }
 
 p3-maybe-rayon = { git = "https://github.com/ProjectZKM/Plonky3" }
 
-zkm-gpu-prover = { git = "https://github.com/ProjectZKM/ziren-gpu", optional = true }
-zkm-gpu-core = { git = "https://github.com/ProjectZKM/ziren-gpu", optional = true }
+zkm-gpu-prover = { git = "https://github.com/ProjectZKM/ziren-gpu", branch = "feat/multi-provers", optional = true }
+zkm-gpu-core = { git = "https://github.com/ProjectZKM/ziren-gpu", branch = "feat/multi-provers", optional = true }
 
 common = { path = "../common" }
 tempfile = "3.18.0"

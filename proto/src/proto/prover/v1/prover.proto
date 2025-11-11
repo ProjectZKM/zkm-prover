@@ -155,6 +155,10 @@ message SingleNodeRequest {
   string program_id = 7;
   includes.v1.Step target_step = 8;
   uint32 seg_size = 9;
+  bytes elf = 10;
+  repeated bytes private_inputs = 11;
+  repeated bytes receipt_inputs = 12;
+  uint32 local_prover_threads = 13;
 }
 
 message SingleNodeResponse {

@@ -10,11 +10,19 @@ pub struct SingleNodeTask {
     pub state: u32,
     pub proof_id: String,
     pub elf_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub elf: Vec<u8>,
     pub private_input_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub private_inputs: Vec<Vec<u8>>,
     pub receipt_inputs_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub receipt_inputs: Vec<Vec<u8>>,
     pub target_step: Step,
     pub trace: Trace,
     pub output: Vec<u8>, // receipt: (reduced proof, vk) or snark proof
     pub seg_size: u32,
     pub total_cycles: u64,
+    #[serde(default)]
+    pub local_prover_threads: u32,
 }
