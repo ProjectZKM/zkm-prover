@@ -1,21 +1,25 @@
 use crate::contexts::ProveContext;
-use crate::{get_prover, NetworkProve, Segment, KEY_CACHE, PROGRAM_CACHE};
+use crate::{get_prover, NetworkProve, ProverComponents, Segment, KEY_CACHE, PROGRAM_CACHE};
 use common::file;
 use zkm_core_machine::utils::trace_checkpoint;
 use zkm_prover::CoreSC;
-use zkm_stark::{MachineProver, MachineProvingKey, StarkGenericConfig};
+use zkm_stark::{MachineProver, StarkGenericConfig};
+
+#[cfg(feature = "gpu")]
+use zkm_stark::MachineProvingKey;
+
+#[cfg(feature = "gpu")]
+use zkm_gpu_prover::GpuProverHandle;
+use zkm_prover::ZKMProver;
 
 #[derive(Default)]
 pub struct RootProver {}
 
 impl RootProver {
     pub fn prove(&self, ctx: &ProveContext) -> anyhow::Result<Vec<u8>> {
-        let segment = if !ctx.segment_bytes.is_empty() {
-            Self::decode_segment(&ctx.segment_bytes)?
-        } else {
-            Self::read_segment_from_file(&ctx.segment)?
-        };
-        self.prove_from_segment(ctx, segment)
+        let segment = Self::prepare_segment(ctx)?;
+        let prover = get_prover();
+        self.prove_with_prover(&prover, ctx, segment)
     }
 
     pub fn prove_from_segment(
@@ -23,9 +27,26 @@ impl RootProver {
         ctx: &ProveContext,
         segment: Segment,
     ) -> anyhow::Result<Vec<u8>> {
+        let prover = get_prover();
+        self.prove_with_prover(&prover, ctx, segment)
+    }
+
+    fn prepare_segment(ctx: &ProveContext) -> anyhow::Result<Segment> {
+        if !ctx.segment_bytes.is_empty() {
+            Self::decode_segment(&ctx.segment_bytes)
+        } else {
+            Self::read_segment_from_file(&ctx.segment)
+        }
+    }
+
+    fn prove_with_prover(
+        &self,
+        prover: &ZKMProver<ProverComponents>,
+        ctx: &ProveContext,
+        segment: Segment,
+    ) -> anyhow::Result<Vec<u8>> {
         let network_prove = NetworkProve::new(ctx.seg_size);
         let opts = network_prove.opts.core_opts;
-        let prover = get_prover();
 
         let mut record = match segment {
             Segment::State(state) => {
@@ -101,6 +122,18 @@ impl RootProver {
         tracing::info!("open time: {:?}", now.elapsed());
 
         Ok(bincode::serialize(&proof)?)
+    }
+
+    #[cfg(feature = "gpu")]
+    pub fn prove_with_gpu_handle(
+        &self,
+        handle: &GpuProverHandle,
+        ctx: &ProveContext,
+    ) -> anyhow::Result<Vec<u8>> {
+        let segment = Self::prepare_segment(ctx)?;
+        handle
+            .with_prover(|prover| self.prove_with_prover(prover, ctx, segment))
+            .map_err(|err| anyhow::anyhow!("failed to execute root proof on GPU: {err}"))?
     }
 
     fn decode_segment(bytes: &[u8]) -> anyhow::Result<Segment> {

@@ -9,17 +9,29 @@ use zkm_recursion_circuit::machine::{
 use zkm_recursion_compiler::config::InnerConfig;
 use zkm_recursion_core::Runtime;
 use zkm_sdk::ZKMProof;
-use zkm_stark::{
-    Challenge, MachineProver, MachineProvingKey, StarkGenericConfig, Val, ZKMCoreOpts,
-};
+use zkm_stark::{Challenge, MachineProver, StarkGenericConfig, Val, ZKMCoreOpts};
+
+#[cfg(feature = "gpu")]
+use zkm_stark::MachineProvingKey;
+
+#[cfg(feature = "gpu")]
+use zkm_gpu_prover::GpuProverHandle;
 
 #[derive(Default)]
 pub struct AggProver {}
 
 impl AggProver {
     pub fn prove(&self, ctx: &AggContext) -> anyhow::Result<Vec<u8>> {
-        let network_prove = NetworkProve::default();
         let prover = get_prover();
+        self.prove_with_prover(&prover, ctx)
+    }
+
+    fn prove_with_prover(
+        &self,
+        prover: &ZKMProver<ProverComponents>,
+        ctx: &AggContext,
+    ) -> anyhow::Result<Vec<u8>> {
+        let network_prove = NetworkProve::default();
         let input = if ctx.is_leaf_layer {
             if !ctx.is_deferred {
                 let shard_proofs = ctx
@@ -64,9 +76,20 @@ impl AggProver {
             })
         };
 
-        let reduced_proof = self.compress(&prover, input, network_prove.opts.recursion_opts)?;
+        let reduced_proof = self.compress(prover, input, network_prove.opts.recursion_opts)?;
 
         Ok(serde_json::to_string(&reduced_proof)?.into_bytes())
+    }
+
+    #[cfg(feature = "gpu")]
+    pub fn prove_with_gpu_handle(
+        &self,
+        handle: &GpuProverHandle,
+        ctx: &AggContext,
+    ) -> anyhow::Result<Vec<u8>> {
+        handle
+            .with_prover(|prover| self.prove_with_prover(prover, ctx))
+            .map_err(|err| anyhow::anyhow!("failed to execute agg proof on GPU: {err}"))?
     }
 
     fn compress(

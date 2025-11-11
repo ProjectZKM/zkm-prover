@@ -7,9 +7,7 @@ use crate::agg_prover::AggProver;
 use crate::contexts::{AggContext, ProveContext, SingleNodeContext, SnarkContext, SplitContext};
 use crate::executor::Executor;
 use crate::snark_prover::SnarkProver;
-use crate::{
-    get_prover, NetworkProve, ProverComponents, FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE,
-};
+use crate::{get_prover, NetworkProve, FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE};
 use anyhow::{anyhow, Context};
 use common::file;
 use std::cmp;
@@ -17,9 +15,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use zkm_core_executor::ZKMReduceProof;
-use zkm_core_machine::ZKM_CIRCUIT_VERSION;
-use zkm_gpu_prover::{MultiGpuProver, ZKMGpuProver};
-use zkm_prover::{ZKMProver, ZKMVerifyingKey};
+#[cfg(feature = "gpu")]
+use zkm_gpu_prover::{GpuProverHandle, MultiGpuProver};
+use zkm_prover::ZKMVerifyingKey;
 use zkm_sdk::network::prover::stage_service::Step;
 use zkm_sdk::ZKMProof;
 use zkm_stark::koala_bear_poseidon2::KoalaBearPoseidon2;
@@ -60,6 +58,7 @@ impl UpperLayerState {
 #[cfg(feature = "gpu")]
 struct StreamingAggregator {
     agg_prover: AggProver,
+    agg_gpu_handle: Option<Arc<GpuProverHandle>>,
     vk_bytes: Vec<u8>,
     is_complete: bool,
     first_layer_expected: usize,
@@ -71,7 +70,12 @@ struct StreamingAggregator {
 
 #[cfg(feature = "gpu")]
 impl StreamingAggregator {
-    fn new(vk_bytes: Vec<u8>, total_segments: usize, deferred_len: usize) -> Self {
+    fn new(
+        vk_bytes: Vec<u8>,
+        total_segments: usize,
+        deferred_len: usize,
+        agg_gpu_handle: Option<Arc<GpuProverHandle>>,
+    ) -> Self {
         let first_layer_batch_size = cmp::max(FIRST_LAYER_BATCH_SIZE, 1) as usize;
         let mut chunk_ranges = 0usize;
         if first_layer_batch_size > 0 {
@@ -87,6 +91,7 @@ impl StreamingAggregator {
 
         Self {
             agg_prover: AggProver::default(),
+            agg_gpu_handle,
             vk_bytes,
             is_complete: total_segments == 1 && deferred_len == 0,
             first_layer_expected,
@@ -130,7 +135,7 @@ impl StreamingAggregator {
             is_leaf_layer: true,
             is_deferred,
         };
-        let proof = self.agg_prover.prove(&ctx)?;
+        let proof = self.run_agg_job(&ctx)?;
 
         if self.upper_layers.is_empty() {
             self.final_result = Some(proof);
@@ -148,49 +153,49 @@ impl StreamingAggregator {
             .expect("upper layers cannot be empty here");
         let mut next_proof = Some(proof);
 
-        for (idx, layer) in self.upper_layers.iter_mut().enumerate() {
+        for idx in 0..self.upper_layers.len() {
             let Some(current) = next_proof.take() else {
                 break;
             };
 
-            layer.processed_inputs += 1;
-            layer.buffer.push_back(current);
+            let ctx_option = {
+                let layer = &mut self.upper_layers[idx];
+                layer.processed_inputs += 1;
+                layer.buffer.push_back(current);
 
-            loop {
                 if layer.buffer.len() >= 2 {
                     let left = layer.buffer.pop_front().unwrap();
                     let right = layer.buffer.pop_front().unwrap();
                     let is_final_chunk = layer.chunk_count == 1 && idx == last_layer_index;
-                    let ctx = AggContext {
+                    Some(AggContext {
                         vk: Vec::new(),
                         proofs: vec![left, right],
                         is_complete: is_final_chunk,
                         is_first_shard: false,
                         is_leaf_layer: false,
                         is_deferred: false,
-                    };
-                    let aggregated = self.agg_prover.prove(&ctx)?;
-                    next_proof = Some(aggregated);
-                    break;
-                }
-
-                if layer.processed_inputs == layer.expected_inputs {
-                    if let Some(remaining) = layer.buffer.pop_front() {
+                    })
+                } else if layer.processed_inputs == layer.expected_inputs {
+                    layer.buffer.pop_front().map(|remaining| {
                         let is_final_chunk = layer.chunk_count == 1 && idx == last_layer_index;
-                        let ctx = AggContext {
+                        AggContext {
                             vk: Vec::new(),
                             proofs: vec![remaining],
                             is_complete: is_final_chunk,
                             is_first_shard: false,
                             is_leaf_layer: false,
                             is_deferred: false,
-                        };
-                        let aggregated = self.agg_prover.prove(&ctx)?;
-                        next_proof = Some(aggregated);
-                        break;
-                    }
+                        }
+                    })
+                } else {
+                    None
                 }
+            };
 
+            if let Some(ctx) = ctx_option {
+                let aggregated = self.run_agg_job(&ctx)?;
+                next_proof = Some(aggregated);
+            } else {
                 next_proof = None;
                 break;
             }
@@ -201,6 +206,14 @@ impl StreamingAggregator {
         }
 
         Ok(())
+    }
+
+    fn run_agg_job(&self, ctx: &AggContext) -> anyhow::Result<Vec<u8>> {
+        if let Some(handle) = &self.agg_gpu_handle {
+            self.agg_prover.prove_with_gpu_handle(handle, ctx)
+        } else {
+            self.agg_prover.prove(ctx)
+        }
     }
 
     fn is_done(&self) -> bool {
@@ -223,6 +236,7 @@ fn run_aggregator(
     config_rx: mpsc::Receiver<AggregatorConfig>,
     proof_rx: mpsc::Receiver<(usize, Vec<u8>)>,
     snark_tx: Option<mpsc::Sender<Vec<u8>>>,
+    agg_gpu_handle: Option<Arc<GpuProverHandle>>,
 ) -> anyhow::Result<Vec<u8>> {
     let config = config_rx
         .recv()
@@ -241,6 +255,7 @@ fn run_aggregator(
         config.vk_bytes.clone(),
         config.total_segments,
         config.deferred_inputs.len(),
+        agg_gpu_handle,
     );
     let mut proofs = BTreeMap::<usize, Vec<u8>>::new();
     let mut next_chunk_index = 0usize;
@@ -350,7 +365,26 @@ impl SingleNodeProver {
         let target_step = Step::from_i32(ctx.target_step)
             .ok_or_else(|| anyhow!("unsupported target step: {}", ctx.target_step))?;
 
-        let provers = ctx.local_prover_threads.max(1);
+        let mut provers = ctx.local_prover_threads.max(1);
+        let (gpu_handles, agg_gpu_handle): (
+            Vec<Arc<GpuProverHandle>>,
+            Option<Arc<GpuProverHandle>>,
+        ) = {
+            let pool = get_local_provers();
+            if pool.is_empty() {
+                return Err(anyhow!("no local GPU provers detected"));
+            }
+            provers = provers.min(pool.len());
+            let handles = (0..provers)
+                .map(|idx| pool.get(idx).expect("missing GPU prover handle"))
+                .collect::<Vec<_>>();
+            let agg_handle = if pool.len() > provers {
+                pool.get(provers)
+            } else {
+                None
+            };
+            (handles, agg_handle)
+        };
         let (segment_tx, segment_rx) = mpsc::channel::<(usize, Vec<u8>)>();
         let (proof_tx, proof_rx) = mpsc::channel::<(usize, Vec<u8>)>();
         let (config_tx, config_rx) = mpsc::channel::<AggregatorConfig>();
@@ -360,13 +394,14 @@ impl SingleNodeProver {
             Step::InSnark => {
                 let (tx, rx) = mpsc::channel::<Vec<u8>>();
                 let proving_key_paths = self.proving_key_paths.clone();
+                let proof_id = ctx.proof_id.clone();
 
                 let handle = std::thread::spawn(move || -> anyhow::Result<Vec<u8>> {
                     let agg_receipt = rx
                         .recv()
                         .map_err(|_| anyhow!("failed to receive aggregate proof for snark"))?;
                     let snark_ctx = SnarkContext {
-                        proof_id: ctx.proof_id,
+                        proof_id,
                         agg_receipt,
                         from_input: false,
                         ..Default::default()
@@ -381,7 +416,7 @@ impl SingleNodeProver {
         };
 
         let aggregator_handle = std::thread::spawn(move || {
-            let result = run_aggregator(config_rx, proof_rx, snark_tx);
+            let result = run_aggregator(config_rx, proof_rx, snark_tx, agg_gpu_handle);
             let _ = agg_result_tx.send(result);
         });
 
@@ -404,7 +439,7 @@ impl SingleNodeProver {
 
         let receiver = Arc::new(Mutex::new(segment_rx));
         let worker_ctx = ProveContext {
-            proof_id: ctx.program_id.clone(),
+            proof_id: ctx.proof_id.clone(),
             program_id: ctx.program_id.clone(),
             elf_path: ctx.elf_path.clone(),
             elf: ctx.elf.clone(),
@@ -414,10 +449,12 @@ impl SingleNodeProver {
 
         // prover
         let mut handles = Vec::with_capacity(provers);
-        for _ in 0..provers {
+        for worker_idx in 0..provers {
             let receiver = Arc::clone(&receiver);
             let mut worker_ctx = worker_ctx.clone();
             let proof_sender = proof_tx.clone();
+            #[cfg(feature = "gpu")]
+            let gpu_handle = gpu_handles[worker_idx].clone();
             handles.push(std::thread::spawn(move || -> anyhow::Result<()> {
                 let root_prover = crate::root_prover::RootProver::default();
                 loop {
@@ -429,7 +466,8 @@ impl SingleNodeProver {
                         Ok((index, segment_bytes)) => {
                             worker_ctx.index = index;
                             worker_ctx.segment_bytes = segment_bytes;
-                            let proof = root_prover.prove(&worker_ctx)?;
+                            let proof =
+                                { root_prover.prove_with_gpu_handle(&gpu_handle, &worker_ctx)? };
                             proof_sender
                                 .send((index, proof))
                                 .map_err(|_| anyhow!("aggregator dropped proof receiver"))?;
