@@ -23,6 +23,8 @@ pub use zkm_sdk;
 pub mod agg_prover;
 pub mod contexts;
 pub mod executor;
+#[cfg(feature = "gpu")]
+pub mod gpu_scheduler;
 pub mod root_prover;
 pub mod snark_prover;
 

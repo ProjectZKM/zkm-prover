@@ -6540,6 +6540,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "common",
+ "crossbeam-channel",
  "lazy_static",
  "lru 0.14.0",
  "once_cell",
