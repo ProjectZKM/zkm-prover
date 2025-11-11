@@ -72,11 +72,9 @@ struct StreamingAggregator {
 #[cfg(feature = "gpu")]
 impl StreamingAggregator {
     fn new(vk_bytes: Vec<u8>, total_segments: usize, deferred_len: usize) -> Self {
-        let first_layer_batch_size = cmp::max(FIRST_LAYER_BATCH_SIZE, 1) as usize;
-        let mut chunk_ranges = 0usize;
-        if first_layer_batch_size > 0 {
-            chunk_ranges = (total_segments + first_layer_batch_size - 1) / first_layer_batch_size;
-        }
+        let first_layer_batch_size = cmp::max(FIRST_LAYER_BATCH_SIZE, 1);
+        let chunk_ranges = (total_segments + first_layer_batch_size - 1) / first_layer_batch_size;
+
         let first_layer_expected = chunk_ranges + deferred_len;
         let mut upper_layers = Vec::new();
         let mut remaining = first_layer_expected;
@@ -265,7 +263,7 @@ fn run_aggregator(
         .recv()
         .context("aggregator config channel closed before receiving config")?;
 
-    let chunk_size = cmp::max(FIRST_LAYER_BATCH_SIZE, 1) as usize;
+    let chunk_size = cmp::max(FIRST_LAYER_BATCH_SIZE, 1);
     let mut chunk_ranges = Vec::new();
     let mut start = 0usize;
     while start < config.total_segments {
@@ -409,8 +407,7 @@ impl SingleNodeProver {
             if total == 0 {
                 return Err(anyhow!("no local GPU provers detected"));
             }
-            let worker_count = ctx.local_prover_threads.max(1).min(total);
-            GpuJobPool::new(pool, worker_count)?
+            GpuJobPool::new(pool, total)?
         };
         let gpu_dispatcher_main = gpu_pool.dispatcher();
         let (segment_tx, segment_rx) = mpsc::channel::<(usize, Vec<u8>)>();

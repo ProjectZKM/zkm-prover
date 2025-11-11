@@ -215,7 +215,8 @@ impl Executor {
         ctx: &SplitContext,
         sender: std::sync::mpsc::Sender<(usize, Vec<u8>)>,
     ) -> anyhow::Result<(u64, u32, Vec<u8>, Vec<(usize, Vec<u8>)>, Vec<u8>)> {
-        // todo: use separate prover
+        // To prevent the executor from occupying a GPU exclusively,
+        // the prover used here doesn’t use GPU resources.
         let prover = get_prover();
         let mut network_prove = NetworkProve::new(ctx.seg_size);
 
