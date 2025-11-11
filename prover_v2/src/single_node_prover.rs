@@ -3,9 +3,10 @@
     allow(unused_imports, dead_code, unused_variables)
 )]
 
-use crate::agg_prover::AggProver;
 use crate::contexts::{AggContext, ProveContext, SingleNodeContext, SnarkContext, SplitContext};
 use crate::executor::Executor;
+#[cfg(feature = "gpu")]
+use crate::gpu_scheduler::{GpuJobDispatcher, GpuJobPool};
 use crate::snark_prover::SnarkProver;
 use crate::{get_prover, NetworkProve, FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE};
 use anyhow::{anyhow, Context};
@@ -13,10 +14,10 @@ use common::file;
 use std::cmp;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, OnceLock};
 use zkm_core_executor::ZKMReduceProof;
 #[cfg(feature = "gpu")]
-use zkm_gpu_prover::{GpuProverHandle, MultiGpuProver};
+use zkm_gpu_prover::MultiGpuProver;
 use zkm_prover::ZKMVerifyingKey;
 use zkm_sdk::network::prover::stage_service::Step;
 use zkm_sdk::ZKMProof;
@@ -57,8 +58,6 @@ impl UpperLayerState {
 
 #[cfg(feature = "gpu")]
 struct StreamingAggregator {
-    agg_prover: AggProver,
-    agg_gpu_handle: Option<Arc<GpuProverHandle>>,
     vk_bytes: Vec<u8>,
     is_complete: bool,
     first_layer_expected: usize,
@@ -66,16 +65,13 @@ struct StreamingAggregator {
     first_shard_emitted: bool,
     upper_layers: Vec<UpperLayerState>,
     final_result: Option<Vec<u8>>,
+    next_job_id: u64,
+    pending_jobs: BTreeMap<u64, usize>,
 }
 
 #[cfg(feature = "gpu")]
 impl StreamingAggregator {
-    fn new(
-        vk_bytes: Vec<u8>,
-        total_segments: usize,
-        deferred_len: usize,
-        agg_gpu_handle: Option<Arc<GpuProverHandle>>,
-    ) -> Self {
+    fn new(vk_bytes: Vec<u8>, total_segments: usize, deferred_len: usize) -> Self {
         let first_layer_batch_size = cmp::max(FIRST_LAYER_BATCH_SIZE, 1) as usize;
         let mut chunk_ranges = 0usize;
         if first_layer_batch_size > 0 {
@@ -90,8 +86,6 @@ impl StreamingAggregator {
         }
 
         Self {
-            agg_prover: AggProver::default(),
-            agg_gpu_handle,
             vk_bytes,
             is_complete: total_segments == 1 && deferred_len == 0,
             first_layer_expected,
@@ -99,6 +93,8 @@ impl StreamingAggregator {
             first_shard_emitted: false,
             upper_layers,
             final_result: None,
+            next_job_id: 0,
+            pending_jobs: BTreeMap::new(),
         }
     }
 
@@ -106,11 +102,11 @@ impl StreamingAggregator {
         &mut self,
         proofs: Vec<Vec<u8>>,
         is_first_chunk: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<AggJobRequest>> {
         self.push_first_layer(proofs, is_first_chunk, false)
     }
 
-    fn push_deferred(&mut self, proof: Vec<u8>) -> anyhow::Result<()> {
+    fn push_deferred(&mut self, proof: Vec<u8>) -> anyhow::Result<Vec<AggJobRequest>> {
         self.push_first_layer(vec![proof], false, true)
     }
 
@@ -119,7 +115,7 @@ impl StreamingAggregator {
         proofs: Vec<Vec<u8>>,
         mark_first_chunk: bool,
         is_deferred: bool,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<AggJobRequest>> {
         self.produced_first_layer += 1;
         let mut is_first_shard = false;
         if !is_deferred && mark_first_chunk && !self.first_shard_emitted {
@@ -135,85 +131,88 @@ impl StreamingAggregator {
             is_leaf_layer: true,
             is_deferred,
         };
-        let proof = self.run_agg_job(&ctx)?;
-
-        if self.upper_layers.is_empty() {
-            self.final_result = Some(proof);
-            return Ok(());
-        }
-
-        self.process_upper_layers(proof)
+        let next_layer = if self.upper_layers.is_empty() {
+            self.upper_layers.len()
+        } else {
+            0
+        };
+        Ok(vec![self.enqueue_job(ctx, next_layer)])
     }
 
-    fn process_upper_layers(&mut self, proof: Vec<u8>) -> anyhow::Result<()> {
-        let last_layer_index = self
-            .upper_layers
-            .len()
-            .checked_sub(1)
-            .expect("upper layers cannot be empty here");
-        let mut next_proof = Some(proof);
+    fn handle_job_completion(
+        &mut self,
+        job_id: u64,
+        proof: Vec<u8>,
+    ) -> anyhow::Result<Vec<AggJobRequest>> {
+        let Some(next_layer) = self.pending_jobs.remove(&job_id) else {
+            return Err(anyhow!("received completion for unknown aggregation job"));
+        };
+        Ok(self.process_upper_layers(proof, next_layer))
+    }
 
-        for idx in 0..self.upper_layers.len() {
-            let Some(current) = next_proof.take() else {
+    fn process_upper_layers(&mut self, proof: Vec<u8>, start_layer: usize) -> Vec<AggJobRequest> {
+        if start_layer >= self.upper_layers.len() {
+            self.final_result = Some(proof);
+            return Vec::new();
+        }
+
+        let mut jobs = Vec::new();
+        let idx = start_layer;
+        let current = proof;
+
+        loop {
+            if idx >= self.upper_layers.len() {
+                self.final_result = Some(current);
                 break;
-            };
+            }
 
-            let ctx_option = {
-                let layer = &mut self.upper_layers[idx];
-                layer.processed_inputs += 1;
-                layer.buffer.push_back(current);
+            let layer_last = self.upper_layers.len() - 1;
+            let layer = &mut self.upper_layers[idx];
+            layer.processed_inputs += 1;
+            layer.buffer.push_back(current);
+            let is_final_chunk = layer.chunk_count == 1 && idx == layer_last;
 
-                if layer.buffer.len() >= 2 {
-                    let left = layer.buffer.pop_front().unwrap();
-                    let right = layer.buffer.pop_front().unwrap();
-                    let is_final_chunk = layer.chunk_count == 1 && idx == last_layer_index;
-                    Some(AggContext {
+            if layer.buffer.len() >= 2 {
+                let left = layer.buffer.pop_front().unwrap();
+                let right = layer.buffer.pop_front().unwrap();
+                let ctx = AggContext {
+                    vk: Vec::new(),
+                    proofs: vec![left, right],
+                    is_complete: is_final_chunk,
+                    is_first_shard: false,
+                    is_leaf_layer: false,
+                    is_deferred: false,
+                };
+                jobs.push(self.enqueue_job(ctx, idx + 1));
+                break;
+            }
+
+            if layer.processed_inputs == layer.expected_inputs {
+                if let Some(remaining) = layer.buffer.pop_front() {
+                    let ctx = AggContext {
                         vk: Vec::new(),
-                        proofs: vec![left, right],
+                        proofs: vec![remaining],
                         is_complete: is_final_chunk,
                         is_first_shard: false,
                         is_leaf_layer: false,
                         is_deferred: false,
-                    })
-                } else if layer.processed_inputs == layer.expected_inputs {
-                    layer.buffer.pop_front().map(|remaining| {
-                        let is_final_chunk = layer.chunk_count == 1 && idx == last_layer_index;
-                        AggContext {
-                            vk: Vec::new(),
-                            proofs: vec![remaining],
-                            is_complete: is_final_chunk,
-                            is_first_shard: false,
-                            is_leaf_layer: false,
-                            is_deferred: false,
-                        }
-                    })
-                } else {
-                    None
+                    };
+                    jobs.push(self.enqueue_job(ctx, idx + 1));
+                    break;
                 }
-            };
-
-            if let Some(ctx) = ctx_option {
-                let aggregated = self.run_agg_job(&ctx)?;
-                next_proof = Some(aggregated);
-            } else {
-                next_proof = None;
-                break;
             }
+
+            break;
         }
 
-        if let Some(final_proof) = next_proof {
-            self.final_result = Some(final_proof);
-        }
-
-        Ok(())
+        jobs
     }
 
-    fn run_agg_job(&self, ctx: &AggContext) -> anyhow::Result<Vec<u8>> {
-        if let Some(handle) = &self.agg_gpu_handle {
-            self.agg_prover.prove_with_gpu_handle(handle, ctx)
-        } else {
-            self.agg_prover.prove(ctx)
-        }
+    fn enqueue_job(&mut self, ctx: AggContext, next_layer: usize) -> AggJobRequest {
+        let job_id = self.next_job_id;
+        self.next_job_id += 1;
+        self.pending_jobs.insert(job_id, next_layer);
+        AggJobRequest { id: job_id, ctx }
     }
 
     fn is_done(&self) -> bool {
@@ -232,12 +231,36 @@ impl StreamingAggregator {
 }
 
 #[cfg(feature = "gpu")]
+struct AggJobRequest {
+    id: u64,
+    ctx: AggContext,
+}
+
+#[cfg(feature = "gpu")]
+fn dispatch_agg_jobs(
+    dispatcher: &GpuJobDispatcher,
+    result_tx: &mpsc::Sender<(u64, anyhow::Result<Vec<u8>>)>,
+    jobs: Vec<AggJobRequest>,
+    pending_gpu_jobs: &mut usize,
+) -> anyhow::Result<()> {
+    for job in jobs {
+        dispatcher
+            .submit_agg(job.id, job.ctx, result_tx.clone())
+            .map_err(|e| anyhow!("failed to dispatch aggregation job: {e}"))?;
+        *pending_gpu_jobs += 1;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gpu")]
 fn run_aggregator(
     config_rx: mpsc::Receiver<AggregatorConfig>,
-    proof_rx: mpsc::Receiver<(usize, Vec<u8>)>,
+    proof_rx: mpsc::Receiver<anyhow::Result<(usize, Vec<u8>)>>,
     snark_tx: Option<mpsc::Sender<Vec<u8>>>,
-    agg_gpu_handle: Option<Arc<GpuProverHandle>>,
+    dispatcher: GpuJobDispatcher,
 ) -> anyhow::Result<Vec<u8>> {
+    use std::time::Duration;
+
     let config = config_rx
         .recv()
         .context("aggregator config channel closed before receiving config")?;
@@ -255,7 +278,6 @@ fn run_aggregator(
         config.vk_bytes.clone(),
         config.total_segments,
         config.deferred_inputs.len(),
-        agg_gpu_handle,
     );
     let mut proofs = BTreeMap::<usize, Vec<u8>>::new();
     let mut next_chunk_index = 0usize;
@@ -263,38 +285,29 @@ fn run_aggregator(
     deferred_inputs.sort_by_key(|(idx, _)| *idx);
     let mut deferred_processed = false;
 
-    loop {
-        while next_chunk_index < chunk_ranges.len() {
-            let (start_idx, end_idx) = chunk_ranges[next_chunk_index];
-            let mut ready = true;
-            for idx in start_idx..end_idx {
-                if !proofs.contains_key(&idx) {
-                    ready = false;
-                    break;
-                }
-            }
-            if !ready {
-                break;
-            }
+    let (agg_job_tx, agg_job_rx) = mpsc::channel::<(u64, anyhow::Result<Vec<u8>>)>();
+    let mut pending_gpu_jobs = 0usize;
+    let mut root_channel_open = true;
 
-            let mut chunk_proofs = Vec::with_capacity(end_idx - start_idx);
-            for idx in start_idx..end_idx {
-                if let Some(proof) = proofs.remove(&idx) {
-                    chunk_proofs.push(proof);
-                }
-            }
-            aggregator.push_normal_chunk(chunk_proofs, next_chunk_index == 0)?;
-            next_chunk_index += 1;
+    loop {
+        while let Ok((job_id, result)) = agg_job_rx.try_recv() {
+            pending_gpu_jobs = pending_gpu_jobs.saturating_sub(1);
+            let followups = match result {
+                Ok(proof) => aggregator.handle_job_completion(job_id, proof)?,
+                Err(err) => return Err(err),
+            };
+            dispatch_agg_jobs(&dispatcher, &agg_job_tx, followups, &mut pending_gpu_jobs)?;
         }
 
         if next_chunk_index == chunk_ranges.len() && !deferred_processed {
             for (_, proof) in deferred_inputs.iter() {
-                aggregator.push_deferred(proof.clone())?;
+                let jobs = aggregator.push_deferred(proof.clone())?;
+                dispatch_agg_jobs(&dispatcher, &agg_job_tx, jobs, &mut pending_gpu_jobs)?;
             }
             deferred_processed = true;
         }
 
-        if aggregator.is_done() {
+        if aggregator.is_done() && pending_gpu_jobs == 0 {
             let result = aggregator.take_final()?;
             if let Some(tx) = snark_tx {
                 tx.send(result.clone())
@@ -303,34 +316,59 @@ fn run_aggregator(
             return Ok(result);
         }
 
-        match proof_rx.recv() {
-            Ok((index, proof)) => {
-                proofs.insert(index, proof);
+        let mut scheduled_chunk = false;
+        while next_chunk_index < chunk_ranges.len() {
+            let (start_idx, end_idx) = chunk_ranges[next_chunk_index];
+            if (start_idx..end_idx).all(|idx| proofs.contains_key(&idx)) {
+                let mut chunk_proofs = Vec::with_capacity(end_idx - start_idx);
+                for idx in start_idx..end_idx {
+                    chunk_proofs.push(proofs.remove(&idx).unwrap());
+                }
+                let jobs = aggregator.push_normal_chunk(chunk_proofs, next_chunk_index == 0)?;
+                dispatch_agg_jobs(&dispatcher, &agg_job_tx, jobs, &mut pending_gpu_jobs)?;
+                next_chunk_index += 1;
+                scheduled_chunk = true;
+            } else {
+                break;
             }
-            Err(_) => {
-                if next_chunk_index < chunk_ranges.len() {
-                    return Err(anyhow!(
-                        "root prover channel closed before all segments were proven"
-                    ));
+        }
+        if scheduled_chunk {
+            continue;
+        }
+
+        if root_channel_open {
+            match proof_rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(Ok((index, proof))) => {
+                    proofs.insert(index, proof);
                 }
-                if !deferred_processed {
-                    for (_, proof) in deferred_inputs.iter() {
-                        aggregator.push_deferred(proof.clone())?;
-                    }
+                Ok(Err(err)) => return Err(err),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    root_channel_open = false;
                 }
-                if aggregator.is_done() {
-                    let result = aggregator.take_final()?;
-                    if let Some(tx) = snark_tx {
-                        tx.send(result.clone()).map_err(|_| {
-                            anyhow!("failed to send aggregate proof to snark after channel close")
-                        })?;
-                    }
-                    return Ok(result);
-                } else {
-                    return Err(anyhow!(
-                        "aggregator finished receiving proofs but final result not produced"
-                    ));
+            }
+        } else if pending_gpu_jobs > 0 {
+            match agg_job_rx.recv() {
+                Ok((job_id, result)) => {
+                    pending_gpu_jobs = pending_gpu_jobs.saturating_sub(1);
+                    let followups = match result {
+                        Ok(proof) => aggregator.handle_job_completion(job_id, proof)?,
+                        Err(err) => return Err(err),
+                    };
+                    dispatch_agg_jobs(&dispatcher, &agg_job_tx, followups, &mut pending_gpu_jobs)?;
                 }
+                Err(_) => {
+                    return Err(anyhow!("aggregation job channel closed"));
+                }
+            }
+        } else {
+            if next_chunk_index < chunk_ranges.len() {
+                return Err(anyhow!(
+                    "root prover channel closed before all segments were proven"
+                ));
+            }
+            if !deferred_processed {
+                continue;
             }
         }
     }
@@ -365,28 +403,18 @@ impl SingleNodeProver {
         let target_step = Step::from_i32(ctx.target_step)
             .ok_or_else(|| anyhow!("unsupported target step: {}", ctx.target_step))?;
 
-        let mut provers = ctx.local_prover_threads.max(1);
-        let (gpu_handles, agg_gpu_handle): (
-            Vec<Arc<GpuProverHandle>>,
-            Option<Arc<GpuProverHandle>>,
-        ) = {
+        let gpu_pool = {
             let pool = get_local_provers();
-            if pool.is_empty() {
+            let total = pool.len();
+            if total == 0 {
                 return Err(anyhow!("no local GPU provers detected"));
             }
-            provers = provers.min(pool.len());
-            let handles = (0..provers)
-                .map(|idx| pool.get(idx).expect("missing GPU prover handle"))
-                .collect::<Vec<_>>();
-            let agg_handle = if pool.len() > provers {
-                pool.get(provers)
-            } else {
-                None
-            };
-            (handles, agg_handle)
+            let worker_count = ctx.local_prover_threads.max(1).min(total);
+            GpuJobPool::new(pool, worker_count)?
         };
+        let gpu_dispatcher_main = gpu_pool.dispatcher();
         let (segment_tx, segment_rx) = mpsc::channel::<(usize, Vec<u8>)>();
-        let (proof_tx, proof_rx) = mpsc::channel::<(usize, Vec<u8>)>();
+        let (proof_tx, proof_rx) = mpsc::channel::<anyhow::Result<(usize, Vec<u8>)>>();
         let (config_tx, config_rx) = mpsc::channel::<AggregatorConfig>();
         let (agg_result_tx, agg_result_rx) = mpsc::channel::<anyhow::Result<Vec<u8>>>();
 
@@ -415,10 +443,13 @@ impl SingleNodeProver {
             _ => (None, None),
         };
 
+        let dispatcher_for_agg = gpu_dispatcher_main.clone();
+        let dispatcher_for_root = gpu_dispatcher_main.clone();
         let aggregator_handle = std::thread::spawn(move || {
-            let result = run_aggregator(config_rx, proof_rx, snark_tx, agg_gpu_handle);
+            let result = run_aggregator(config_rx, proof_rx, snark_tx, dispatcher_for_agg);
             let _ = agg_result_tx.send(result);
         });
+        drop(gpu_dispatcher_main);
 
         let split_ctx = SplitContext {
             base_dir: ctx.base_dir.clone(),
@@ -437,7 +468,6 @@ impl SingleNodeProver {
             receipt_inputs: ctx.receipt_inputs.clone(),
         };
 
-        let receiver = Arc::new(Mutex::new(segment_rx));
         let worker_ctx = ProveContext {
             proof_id: ctx.proof_id.clone(),
             program_id: ctx.program_id.clone(),
@@ -446,39 +476,17 @@ impl SingleNodeProver {
             seg_size: ctx.seg_size,
             ..Default::default()
         };
-
-        // prover
-        let mut handles = Vec::with_capacity(provers);
-        for worker_idx in 0..provers {
-            let receiver = Arc::clone(&receiver);
-            let mut worker_ctx = worker_ctx.clone();
-            let proof_sender = proof_tx.clone();
-            #[cfg(feature = "gpu")]
-            let gpu_handle = gpu_handles[worker_idx].clone();
-            handles.push(std::thread::spawn(move || -> anyhow::Result<()> {
-                let root_prover = crate::root_prover::RootProver::default();
-                loop {
-                    let msg = {
-                        let guard = receiver.lock().unwrap();
-                        guard.recv()
-                    };
-                    match msg {
-                        Ok((index, segment_bytes)) => {
-                            worker_ctx.index = index;
-                            worker_ctx.segment_bytes = segment_bytes;
-                            let proof =
-                                { root_prover.prove_with_gpu_handle(&gpu_handle, &worker_ctx)? };
-                            proof_sender
-                                .send((index, proof))
-                                .map_err(|_| anyhow!("aggregator dropped proof receiver"))?;
-                        }
-                        Err(_) => break,
-                    }
-                }
-                Ok(())
-            }));
-        }
-        drop(proof_tx);
+        let proof_sender_for_root = proof_tx.clone();
+        let segment_handle = std::thread::spawn(move || -> anyhow::Result<()> {
+            let template = worker_ctx;
+            while let Ok((index, segment_bytes)) = segment_rx.recv() {
+                let mut ctx = template.clone();
+                ctx.index = index;
+                ctx.segment_bytes = segment_bytes;
+                dispatcher_for_root.submit_root(ctx, proof_sender_for_root.clone())?;
+            }
+            Ok(())
+        });
 
         let executor = Executor::default();
         let (total_steps, total_segments, _public_values, deferred_inputs, vk_bytes) =
@@ -493,15 +501,12 @@ impl SingleNodeProver {
             .map_err(|_| anyhow!("aggregator dropped config receiver"))?;
         drop(config_tx);
 
-        for handle in handles {
-            match handle.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => return Err(e),
-                Err(join_err) => {
-                    return Err(anyhow!("root prover worker panicked: {:?}", join_err))
-                }
-            }
+        match segment_handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(join_err) => return Err(anyhow!("segment dispatcher panicked: {:?}", join_err)),
         }
+        drop(proof_tx);
 
         let aggregated_result = match agg_result_rx.recv() {
             Ok(res) => res,
