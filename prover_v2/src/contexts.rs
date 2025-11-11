@@ -5,15 +5,21 @@ pub struct SplitContext {
     pub base_dir: String,
     pub program_id: String,
     pub elf_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub elf: Vec<u8>,
     pub block_no: Option<u64>,
     pub seg_size: u32,
     pub seg_path: String,
     // TODO: remove
     pub public_input_path: String,
     pub private_input_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub private_inputs: Vec<Vec<u8>>,
     pub output_path: String,
     pub args: String,
     pub receipt_inputs_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub receipt_inputs: Vec<Vec<u8>>,
 }
 
 impl SplitContext {
@@ -35,14 +41,17 @@ impl SplitContext {
             base_dir: basedir.to_string(),
             program_id: program_id.to_string(),
             elf_path: elf_path.to_string(),
+            elf: Vec::new(),
             block_no,
             seg_size,
             seg_path: seg_path.to_string(),
             public_input_path: public_input_path.to_string(),
             private_input_path: private_input_path.to_string(),
+            private_inputs: Vec::new(),
             output_path: output_path.to_string(),
             args: args.to_string(),
             receipt_inputs_path: receipt_inputs_path.to_string(),
+            receipt_inputs: Vec::new(),
         }
     }
 }
@@ -53,9 +62,13 @@ pub struct ProveContext {
     pub program_id: String,
     pub index: usize,
     pub elf_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub elf: Vec<u8>,
     // execution record
     // pub segment: Vec<u8>,
     pub segment: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub segment_bytes: Vec<u8>,
     pub seg_size: u32,
     // pub receipts_input: Vec<Vec<u8>>,
 }
@@ -84,11 +97,20 @@ pub struct SnarkContext {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SingleNodeContext {
+    pub proof_id: String,
     pub program_id: String,
     pub elf_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub elf: Vec<u8>,
     pub base_dir: String,
     pub seg_size: u32,
     pub private_input_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub private_inputs: Vec<Vec<u8>>,
     pub receipt_inputs_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub receipt_inputs: Vec<Vec<u8>>,
     pub target_step: i32,
+    #[serde(default)]
+    pub local_prover_threads: usize,
 }

@@ -32,6 +32,97 @@ use crate::{
     FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE,
 };
 
+pub trait SegmentSink: Send + Sync {
+    fn on_segments(&self, base_index: usize, segments: Vec<Vec<u8>>);
+
+    fn on_segment_count(&self, _total: usize) {}
+
+    fn on_deferred(&self, _index: usize, _data: Vec<u8>) {}
+}
+
+pub struct FileSegmentSink<'a> {
+    base_path: &'a str,
+}
+
+impl<'a> FileSegmentSink<'a> {
+    pub fn new(base_path: &'a str) -> Self {
+        Self { base_path }
+    }
+
+    fn segment_path(&self, index: usize) -> String {
+        format!("{}/{}", self.base_path, index)
+    }
+
+    fn deferred_path(&self, index: usize) -> String {
+        format!("{}/deferred_proof_{}", self.base_path, index)
+    }
+}
+
+impl<'a> SegmentSink for FileSegmentSink<'a> {
+    fn on_segments(&self, base_index: usize, segments: Vec<Vec<u8>>) {
+        for (offset, segment) in segments.into_iter().enumerate() {
+            write_file(self.segment_path(base_index + offset), &segment)
+                .expect("Failed to write segment");
+        }
+    }
+
+    fn on_segment_count(&self, total: usize) {
+        write_file(
+            format!("{}/segments.txt", self.base_path),
+            total.to_string().as_bytes(),
+        )
+        .expect("Failed to write segment count");
+    }
+
+    fn on_deferred(&self, index: usize, data: Vec<u8>) {
+        file::new(&self.deferred_path(index))
+            .write_all(&data)
+            .expect("Failed to write deferred proof");
+    }
+}
+
+pub struct ChannelSegmentSink {
+    sender: std::sync::mpsc::Sender<(usize, Vec<u8>)>,
+    total_segments: Mutex<usize>,
+    deferred: Mutex<Vec<(usize, Vec<u8>)>>,
+}
+
+impl ChannelSegmentSink {
+    pub fn new(sender: std::sync::mpsc::Sender<(usize, Vec<u8>)>) -> Self {
+        Self {
+            sender,
+            total_segments: Mutex::new(0),
+            deferred: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn total_segments(&self) -> usize {
+        *self.total_segments.lock().unwrap()
+    }
+
+    pub fn deferred_inputs(&self) -> Vec<(usize, Vec<u8>)> {
+        self.deferred.lock().unwrap().clone()
+    }
+}
+
+impl SegmentSink for ChannelSegmentSink {
+    fn on_segments(&self, base_index: usize, segments: Vec<Vec<u8>>) {
+        for (offset, segment) in segments.into_iter().enumerate() {
+            self.sender
+                .send((base_index + offset, segment))
+                .expect("segment receiver dropped");
+        }
+    }
+
+    fn on_segment_count(&self, total: usize) {
+        *self.total_segments.lock().unwrap() = total;
+    }
+
+    fn on_deferred(&self, index: usize, data: Vec<u8>) {
+        self.deferred.lock().unwrap().push((index, data));
+    }
+}
+
 #[derive(Default)]
 pub struct Executor {}
 impl Executor {
@@ -39,15 +130,23 @@ impl Executor {
         let prover = get_prover();
         let mut network_prove = NetworkProve::new(ctx.seg_size);
 
-        let encoded_input = file::new(&ctx.private_input_path).read()?;
-        let inputs_data: Vec<Vec<u8>> = bincode::deserialize(&encoded_input)?;
+        let inputs_data: Vec<Vec<u8>> = if !ctx.private_inputs.is_empty() {
+            ctx.private_inputs.clone()
+        } else {
+            let encoded_input = file::new(&ctx.private_input_path).read()?;
+            bincode::deserialize(&encoded_input)?
+        };
         inputs_data.into_iter().for_each(|input| {
             network_prove.stdin.write_vec(input);
         });
 
-        if !ctx.receipt_inputs_path.is_empty() {
-            let receipt_datas = std::fs::read(&ctx.receipt_inputs_path)?;
-            let receipts = bincode::deserialize::<Vec<Vec<u8>>>(&receipt_datas)?;
+        if !ctx.receipt_inputs.is_empty() || !ctx.receipt_inputs_path.is_empty() {
+            let receipts = if !ctx.receipt_inputs.is_empty() {
+                ctx.receipt_inputs.clone()
+            } else {
+                let receipt_datas = std::fs::read(&ctx.receipt_inputs_path)?;
+                bincode::deserialize::<Vec<Vec<u8>>>(&receipt_datas)?
+            };
             for receipt in receipts.iter() {
                 let receipt: (
                     ZKMReduceProof<KoalaBearPoseidon2>,
@@ -64,8 +163,12 @@ impl Executor {
             program
         } else {
             tracing::info!("No program in cache, generate new program");
-            let elf_path = ctx.elf_path.clone();
-            let elf = file::new(&elf_path).read()?;
+            let elf = if !ctx.elf.is_empty() {
+                ctx.elf.clone()
+            } else {
+                let elf_path = ctx.elf_path.clone();
+                file::new(&elf_path).read()?
+            };
             let program = prover
                 .get_program(&elf)
                 .map_err(|e| anyhow::Error::msg(e.to_string()))?;
@@ -87,6 +190,7 @@ impl Executor {
         file::new(&format!("{}/vk.bin", ctx.base_dir)).write_all(&vk_bytes)?;
 
         let context = network_prove.context_builder.build();
+        let segment_sink = FileSegmentSink::new(&ctx.seg_path);
         let (total_steps, total_segments, public_values_stream) = self.split_with_context(
             &prover,
             ctx,
@@ -96,6 +200,7 @@ impl Executor {
             network_prove.opts.core_opts,
             context,
             prover.core_shape_config.as_ref(),
+            &segment_sink,
         )?;
         // write public_values_stream
         // file::new(&ctx.output_path).write(&public_values_stream)?;
@@ -105,17 +210,108 @@ impl Executor {
         Ok((total_steps, total_segments))
     }
 
+    pub fn split_streaming(
+        &self,
+        ctx: &SplitContext,
+        sender: std::sync::mpsc::Sender<(usize, Vec<u8>)>,
+    ) -> anyhow::Result<(u64, u32, Vec<u8>, Vec<(usize, Vec<u8>)>, Vec<u8>)> {
+        // todo: use separate prover
+        let prover = get_prover();
+        let mut network_prove = NetworkProve::new(ctx.seg_size);
+
+        let inputs_data: Vec<Vec<u8>> = if !ctx.private_inputs.is_empty() {
+            ctx.private_inputs.clone()
+        } else {
+            let encoded_input = file::new(&ctx.private_input_path).read()?;
+            bincode::deserialize(&encoded_input)?
+        };
+        inputs_data.into_iter().for_each(|input| {
+            network_prove.stdin.write_vec(input);
+        });
+
+        if !ctx.receipt_inputs.is_empty() || !ctx.receipt_inputs_path.is_empty() {
+            let receipts = if !ctx.receipt_inputs.is_empty() {
+                ctx.receipt_inputs.clone()
+            } else {
+                let receipt_datas = std::fs::read(&ctx.receipt_inputs_path)?;
+                bincode::deserialize::<Vec<Vec<u8>>>(&receipt_datas)?
+            };
+            for receipt in receipts.iter() {
+                let receipt: (
+                    ZKMReduceProof<KoalaBearPoseidon2>,
+                    StarkVerifyingKey<KoalaBearPoseidon2>,
+                ) = bincode::deserialize(receipt).map_err(|e| anyhow::anyhow!(e))?;
+                network_prove.stdin.write_proof(receipt.0, receipt.1);
+            }
+            tracing::info!("Write {} receipts", receipts.len());
+        }
+
+        let mut program_cache = PROGRAM_CACHE.lock();
+        let program = if let Some(program) = program_cache.cache.get(&ctx.program_id) {
+            tracing::info!("load program from cache");
+            program
+        } else {
+            tracing::info!("No program in cache, generate new program");
+            let elf = if !ctx.elf.is_empty() {
+                ctx.elf.clone()
+            } else {
+                let elf_path = ctx.elf_path.clone();
+                file::new(&elf_path).read()?
+            };
+            let program = prover
+                .get_program(&elf)
+                .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+            program_cache.push(ctx.program_id.clone(), program);
+            program_cache.cache.get(&ctx.program_id).unwrap()
+        };
+
+        let mut cache = KEY_CACHE.lock();
+        let vk = if let Some((_, vk)) = cache.cache.get(&ctx.program_id) {
+            tracing::info!("load vk from cache");
+            vk
+        } else {
+            tracing::info!("No vk in cache, generate new keys");
+            let (pk, vk) = prover.core_prover.setup(program);
+            cache.push(ctx.program_id.clone(), (pk, vk));
+            &cache.cache.get(&ctx.program_id).unwrap().1
+        };
+        let vk_bytes = bincode::serialize(&vk)?;
+
+        let context = network_prove.context_builder.build();
+        let segment_sink = Arc::new(ChannelSegmentSink::new(sender));
+        let (total_steps, total_segments, public_values_stream) = self.split_with_context(
+            &prover,
+            ctx,
+            program,
+            vk,
+            &network_prove.stdin,
+            network_prove.opts.core_opts,
+            context,
+            prover.core_shape_config.as_ref(),
+            segment_sink.as_ref(),
+        )?;
+
+        Ok((
+            total_steps,
+            total_segments,
+            public_values_stream,
+            segment_sink.deferred_inputs(),
+            vk_bytes,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
-    pub fn split_with_context<'a>(
+    pub fn split_with_context<'a, S: SegmentSink>(
         &self,
         prover: &'a ZKMProver<ProverComponents>,
-        ctx: &SplitContext,
+        _ctx: &SplitContext,
         program: &Program,
         vk: &StarkVerifyingKey<CoreSC>,
         stdin: &ZKMStdin,
         opts: ZKMCoreOpts,
         mut context: ZKMContext<'a>,
         shape_config: Option<&CoreShapeConfig<<CoreSC as StarkGenericConfig>::Val>>,
+        segment_sink: &S,
     ) -> anyhow::Result<(u64, u32, Vec<u8>)> {
         context.subproof_verifier = Some(prover as &dyn SubproofVerifier);
         // Setup the runtime.
@@ -289,11 +485,7 @@ impl Executor {
                                 let base_index = *segment_index;
                                 *segment_index += records.len() + deferred.len();
 
-                                write_file(
-                                    format!("{}/segments.txt", ctx.seg_path),
-                                    segment_index.to_string().as_bytes(),
-                                )
-                                .expect("Failed to write file_no");
+                                segment_sink.on_segment_count(*segment_index);
 
                                 // Let another worker update the state.
                                 record_gen_sync.advance_turn();
@@ -307,25 +499,19 @@ impl Executor {
                                 .chain(deferred.into_iter().map(|r| Segment::Record(Box::new(r))))
                                 .collect();
 
-                                segments.par_iter().enumerate().for_each(|(i, segment)| {
-                                    let now = Instant::now();
-                                    let encoded_segment = bincode::serialize(&segment).unwrap();
-                                    // use zstd to compress, level = 2 or 3
-                                    let compressed_segment =
-                                        zstd::stream::encode_all(&*encoded_segment, 2)
-                                            .expect("zstd compress failed");
-                                    write_file(
-                                        format!("{}/{}", ctx.seg_path, base_index + i),
-                                        &compressed_segment,
-                                    )
-                                    .expect("Failed to write segment");
-
-                                    tracing::info!(
-                                        "Wrote record {} in {:?}",
-                                        base_index + i,
-                                        now.elapsed()
-                                    );
-                                });
+                                let compressed_segments: Vec<Vec<u8>> = segments
+                                    .par_iter()
+                                    .map(|segment| {
+                                        let now = Instant::now();
+                                        let encoded_segment = bincode::serialize(&segment).unwrap();
+                                        let compressed_segment =
+                                            zstd::stream::encode_all(&*encoded_segment, 2)
+                                                .expect("zstd compress failed");
+                                        tracing::info!("Encoded segment in {:?}", now.elapsed());
+                                        compressed_segment
+                                    })
+                                    .collect();
+                                segment_sink.on_segments(base_index, compressed_segments);
 
                                 // process deferred proofs
                                 if done && !stdin.proofs.is_empty() {
@@ -356,14 +542,7 @@ impl Executor {
                                         |(i, deferred_input)| {
                                             let encoded_proof =
                                                 bincode::serialize(&deferred_input).unwrap();
-                                            // Start numbering from 2^16.
-                                            file::new(&format!(
-                                                "{}/deferred_proof_{}",
-                                                ctx.seg_path,
-                                                (1 << 16) | i
-                                            ))
-                                            .write_all(&encoded_proof)
-                                            .expect("Failed to write deferred proof");
+                                            segment_sink.on_deferred((1 << 16) | i, encoded_proof);
                                         },
                                     );
                                 }

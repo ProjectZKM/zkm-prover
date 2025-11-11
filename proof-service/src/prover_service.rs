@@ -1,12 +1,12 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use crate::proto::includes::v1::ProverVersion;
 use crate::proto::prover_service::v1::{
-    get_status_response, prover_service_server::ProverService, AggregateRequest, AggregateResponse,
-    GetStatusRequest, GetStatusResponse, GetTaskResultRequest, GetTaskResultResponse, ProveRequest,
-    ProveResponse, Result, ResultCode, SingleNodeRequest, SingleNodeResponse, SnarkProofRequest,
+    prover_service_server::ProverService, AggregateRequest, AggregateResponse, GetStatusRequest,
+    GetStatusResponse, GetTaskResultRequest, GetTaskResultResponse, ProveRequest, ProveResponse,
+    Result, ResultCode, SingleNodeRequest, SingleNodeResponse, SnarkProofRequest,
     SnarkProofResponse, SplitElfRequest, SplitElfResponse,
 };
 use crate::{config, metrics};
@@ -210,6 +210,7 @@ impl ProverService for ProverServiceSVC {
                 elf_path: request.get_ref().elf_path.clone(),
                 segment: request.get_ref().segment.clone(),
                 seg_size: request.get_ref().seg_size,
+                ..Default::default()
             };
 
             let pipeline = self.pipeline.clone();
@@ -368,13 +369,18 @@ impl ProverService for ProverServiceSVC {
             );
             let start = Instant::now();
             let single_node_context = SingleNodeContext {
+                proof_id: request.get_ref().proof_id.to_string(),
                 program_id: request.get_ref().program_id.to_string(),
                 elf_path: request.get_ref().elf_path.to_string(),
+                elf: request.get_ref().elf.clone(),
                 base_dir: request.get_ref().base_dir.to_string(),
                 private_input_path: request.get_ref().private_input_path.to_string(),
+                private_inputs: request.get_ref().private_inputs.clone(),
                 receipt_inputs_path: request.get_ref().receipt_inputs_path.to_string(),
+                receipt_inputs: request.get_ref().receipt_inputs.clone(),
                 target_step: request.get_ref().target_step,
                 seg_size: request.get_ref().seg_size,
+                local_prover_threads: request.get_ref().local_prover_threads as usize,
             };
 
             let pipeline = self.pipeline.clone();

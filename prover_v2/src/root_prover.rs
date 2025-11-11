@@ -10,45 +10,19 @@ pub struct RootProver {}
 
 impl RootProver {
     pub fn prove(&self, ctx: &ProveContext) -> anyhow::Result<Vec<u8>> {
-        let now = std::time::Instant::now();
-        let segment: Segment = {
-            let mut retries = 0;
-            const MAX_RETRIES: usize = 10;
-
-            loop {
-                let result = std::fs::read(&ctx.segment)
-                    .and_then(|segment| {
-                        zstd::stream::decode_all(&*segment)
-                            .map_err(|e| std::io::Error::other(format!("zstd decode failed: {e}")))
-                    })
-                    .and_then(|decoded| {
-                        bincode::deserialize::<Segment>(&decoded).map_err(|e| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("deserialize failed: {e}"),
-                            )
-                        })
-                    });
-
-                match result {
-                    Ok(r) => break r,
-                    Err(e) => {
-                        if retries >= MAX_RETRIES {
-                            return Err(anyhow::anyhow!(
-                                "Segment read/decode failed after {} retries: {}",
-                                MAX_RETRIES,
-                                e
-                            ));
-                        }
-                        tracing::warn!("Segment {:?} error: {}, retrying...", ctx.segment, e);
-                        retries += 1;
-                        std::thread::sleep(std::time::Duration::from_millis(300));
-                    }
-                }
-            }
+        let segment = if !ctx.segment_bytes.is_empty() {
+            Self::decode_segment(&ctx.segment_bytes)?
+        } else {
+            Self::read_segment_from_file(&ctx.segment)?
         };
-        tracing::info!("read segment time: {:?}", now.elapsed());
+        self.prove_from_segment(ctx, segment)
+    }
 
+    pub fn prove_from_segment(
+        &self,
+        ctx: &ProveContext,
+        segment: Segment,
+    ) -> anyhow::Result<Vec<u8>> {
         let network_prove = NetworkProve::new(ctx.seg_size);
         let opts = network_prove.opts.core_opts;
         let prover = get_prover();
@@ -61,7 +35,11 @@ impl RootProver {
                     program
                 } else {
                     tracing::info!("No program in cache, generate new program");
-                    let elf = file::new(&ctx.elf_path).read()?;
+                    let elf = if !ctx.elf.is_empty() {
+                        ctx.elf.clone()
+                    } else {
+                        file::new(&ctx.elf_path).read()?
+                    };
                     let program = prover
                         .get_program(&elf)
                         .map_err(|e| anyhow::Error::msg(e.to_string()))?;
@@ -123,5 +101,53 @@ impl RootProver {
         tracing::info!("open time: {:?}", now.elapsed());
 
         Ok(bincode::serialize(&proof)?)
+    }
+
+    fn decode_segment(bytes: &[u8]) -> anyhow::Result<Segment> {
+        let decoded = zstd::stream::decode_all(bytes)
+            .map_err(|e| anyhow::anyhow!("zstd decode failed: {e}"))?;
+        Ok(bincode::deserialize::<Segment>(&decoded)
+            .map_err(|e| anyhow::anyhow!("segment deserialize failed: {e}"))?)
+    }
+
+    fn read_segment_from_file(path: &str) -> anyhow::Result<Segment> {
+        let now = std::time::Instant::now();
+        let mut retries = 0;
+        const MAX_RETRIES: usize = 10;
+
+        loop {
+            let result = std::fs::read(path)
+                .and_then(|segment| {
+                    zstd::stream::decode_all(&*segment)
+                        .map_err(|e| std::io::Error::other(format!("zstd decode failed: {e}")))
+                })
+                .and_then(|decoded| {
+                    bincode::deserialize::<Segment>(&decoded).map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("deserialize failed: {e}"),
+                        )
+                    })
+                });
+
+            match result {
+                Ok(r) => {
+                    tracing::info!("read segment time: {:?}", now.elapsed());
+                    break Ok(r);
+                }
+                Err(e) => {
+                    if retries >= MAX_RETRIES {
+                        break Err(anyhow::anyhow!(
+                            "Segment read/decode failed after {} retries: {}",
+                            MAX_RETRIES,
+                            e
+                        ));
+                    }
+                    tracing::warn!("Segment {:?} error: {}, retrying...", path, e);
+                    retries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+            }
+        }
     }
 }

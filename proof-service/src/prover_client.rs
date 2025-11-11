@@ -516,11 +516,15 @@ pub async fn single_node(
                 computed_request_id: single_node_task.task_id.clone(),
                 base_dir: single_node_task.base_dir.clone(),
                 elf_path: single_node_task.elf_path.clone(),
+                elf: single_node_task.elf.clone(),
                 private_input_path: single_node_task.private_input_path.clone(),
+                private_inputs: single_node_task.private_inputs.clone(),
                 receipt_inputs_path: single_node_task.receipt_inputs_path.clone(),
+                receipt_inputs: single_node_task.receipt_inputs.clone(),
                 program_id: single_node_task.program_id.clone(),
                 target_step: single_node_task.target_step.into(),
                 seg_size: single_node_task.seg_size,
+                local_prover_threads: single_node_task.local_prover_threads,
             };
             tracing::info!(
                 "[single node] rpc {} {}:{} start",

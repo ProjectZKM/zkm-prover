@@ -632,6 +632,35 @@ impl Stage {
         on_task!(snark_task, dst, self);
     }
     pub fn get_single_node_task(&self) -> SingleNodeTask {
+        let elf = safe_read(&self.generate_task.elf_path);
+        let private_inputs = if self.generate_task.private_input_path.is_empty() {
+            Vec::new()
+        } else {
+            std::fs::read(&self.generate_task.private_input_path)
+                .ok()
+                .and_then(|data| {
+                    if data.is_empty() {
+                        Some(Vec::new())
+                    } else {
+                        bincode::deserialize::<Vec<Vec<u8>>>(&data).ok()
+                    }
+                })
+                .unwrap_or_default()
+        };
+        let receipt_inputs = if self.generate_task.receipt_inputs_path.is_empty() {
+            Vec::new()
+        } else {
+            std::fs::read(&self.generate_task.receipt_inputs_path)
+                .ok()
+                .and_then(|data| {
+                    if data.is_empty() {
+                        Some(Vec::new())
+                    } else {
+                        bincode::deserialize::<Vec<Vec<u8>>>(&data).ok()
+                    }
+                })
+                .unwrap_or_default()
+        };
         SingleNodeTask {
             task_id: uuid::Uuid::new_v4().to_string(),
             program_id: self.generate_task.program_id.clone(),
@@ -639,10 +668,15 @@ impl Stage {
             proof_id: self.generate_task.proof_id.clone(),
             state: TASK_STATE_UNPROCESSED,
             elf_path: self.generate_task.elf_path.clone(),
+            elf,
             private_input_path: self.generate_task.private_input_path.clone(),
+            private_inputs,
             receipt_inputs_path: self.generate_task.receipt_inputs_path.clone(),
+            receipt_inputs,
             target_step: self.generate_task.target_step,
             seg_size: self.generate_task.seg_size,
+            // In single node task, we use max_prover_num as number of local provers
+            local_prover_threads: self.generate_task.max_prover_num,
             ..Default::default()
         }
     }
