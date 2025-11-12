@@ -158,23 +158,25 @@ impl Executor {
             tracing::info!("Write {} receipts", receipts.len());
         }
 
-        let mut program_cache = PROGRAM_CACHE.lock();
-        let program = if let Some(program) = program_cache.cache.get(&ctx.program_id) {
-            tracing::info!("load program from cache");
-            program
-        } else {
-            tracing::info!("No program in cache, generate new program");
-            let elf = if !ctx.elf.is_empty() {
-                ctx.elf.clone()
+        let program = {
+            let mut program_cache = PROGRAM_CACHE.lock();
+            if let Some(program) = program_cache.cache.get(&ctx.program_id) {
+                tracing::info!("load program from cache");
+                program.clone()
             } else {
-                let elf_path = ctx.elf_path.clone();
-                file::new(&elf_path).read()?
-            };
-            let program = prover
-                .get_program(&elf)
-                .map_err(|e| anyhow::Error::msg(e.to_string()))?;
-            program_cache.push(ctx.program_id.clone(), program);
-            program_cache.cache.get(&ctx.program_id).unwrap()
+                tracing::info!("No program in cache, generate new program");
+                let elf = if !ctx.elf.is_empty() {
+                    ctx.elf.clone()
+                } else {
+                    let elf_path = ctx.elf_path.clone();
+                    file::new(&elf_path).read()?
+                };
+                let program = prover
+                    .get_program(&elf)
+                    .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+                program_cache.push(ctx.program_id.clone(), program.clone());
+                program
+            }
         };
 
         let mut cache = KEY_CACHE.lock();
@@ -184,7 +186,7 @@ impl Executor {
             vk
         } else {
             tracing::info!("No vk in cache, generate new keys");
-            let (pk, vk) = prover.core_prover.setup(program);
+            let (pk, vk) = prover.core_prover.setup(&program);
             cache.push(device_id, ctx.program_id.clone(), (pk, vk));
             &cache.get(device_id, &ctx.program_id).unwrap().1
         };
@@ -196,7 +198,7 @@ impl Executor {
         let (total_steps, total_segments, public_values_stream) = self.split_with_context(
             &prover,
             ctx,
-            program,
+            &program,
             vk,
             &network_prove.stdin,
             network_prove.opts.core_opts,
@@ -279,7 +281,7 @@ impl Executor {
         //     let (pk, vk) = prover.core_prover.setup(program);
         //     cache.push(device_id, ctx.program_id.clone(), (pk, vk));
         // };
-        let (_, vk) = prover.core_prover.setup(program);
+        let (_, vk) = prover.core_prover.setup(&program);
         let vk_bytes = bincode::serialize(&vk)?;
 
         let context = network_prove.context_builder.build();
@@ -287,7 +289,7 @@ impl Executor {
         let (total_steps, total_segments, public_values_stream) = self.split_with_context(
             &prover,
             ctx,
-            program,
+            &program,
             &vk,
             &network_prove.stdin,
             network_prove.opts.core_opts,

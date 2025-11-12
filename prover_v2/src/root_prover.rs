@@ -55,22 +55,24 @@ impl RootProver {
 
         let mut record = match segment {
             Segment::State(state) => {
-                let mut program_cache = PROGRAM_CACHE.lock();
-                let program = if let Some(program) = program_cache.cache.get(&ctx.program_id) {
-                    tracing::info!("load program from cache");
-                    program
-                } else {
-                    tracing::info!("No program in cache, generate new program");
-                    let elf = if !ctx.elf.is_empty() {
-                        ctx.elf.clone()
+                let program = {
+                    let mut program_cache = PROGRAM_CACHE.lock();
+                    if let Some(program) = program_cache.cache.get(&ctx.program_id) {
+                        tracing::info!("load program from cache");
+                        program.clone()
                     } else {
-                        file::new(&ctx.elf_path).read()?
-                    };
-                    let program = prover
-                        .get_program(&elf)
-                        .map_err(|e| anyhow::Error::msg(e.to_string()))?;
-                    program_cache.push(ctx.program_id.clone(), program);
-                    program_cache.cache.get(&ctx.program_id).unwrap()
+                        tracing::info!("No program in cache, generate new program");
+                        let elf = if !ctx.elf.is_empty() {
+                            ctx.elf.clone()
+                        } else {
+                            file::new(&ctx.elf_path).read()?
+                        };
+                        let program = prover
+                            .get_program(&elf)
+                            .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+                        program_cache.push(ctx.program_id.clone(), program.clone());
+                        program
+                    }
                 };
                 let public_values = state.public_values;
                 let (records, _) = tracing::debug_span!("trace checkpoint").in_scope(|| {
