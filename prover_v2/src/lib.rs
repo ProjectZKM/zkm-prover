@@ -114,22 +114,33 @@ type ProvingKey = StarkProvingKey<CoreSC>;
 #[cfg(feature = "gpu")]
 type ProvingKey =
     StarkProvingKeyDevice<CoreSC, FieldMerkleTreeDeviceCommitter<DeviceHasherKoalaBear>>;
+type KeyCacheKey = (u32, String);
+
 pub struct StarkKeyCache {
-    pub cache: LruCache<String, (ProvingKey, StarkVerifyingKey<CoreSC>)>,
+    pub cache: LruCache<KeyCacheKey, (ProvingKey, StarkVerifyingKey<CoreSC>)>,
 }
 
 impl StarkKeyCache {
     pub fn new(size: usize) -> Self {
-        let cache = LruCache::<String, (ProvingKey, StarkVerifyingKey<CoreSC>)>::new(
+        let cache = LruCache::<KeyCacheKey, (ProvingKey, StarkVerifyingKey<CoreSC>)>::new(
             NonZeroUsize::new(size).unwrap(),
         );
         Self { cache }
     }
-    pub fn contains(&mut self, key: &String) -> bool {
-        self.cache.get(key).is_some()
+    pub fn get(
+        &mut self,
+        device_id: u32,
+        program_id: &str,
+    ) -> Option<&(ProvingKey, StarkVerifyingKey<CoreSC>)> {
+        self.cache.get(&(device_id, program_id.to_owned()))
     }
-    pub fn push(&mut self, key: String, v: (ProvingKey, StarkVerifyingKey<CoreSC>)) {
-        self.cache.push(key.clone(), v);
+    pub fn push(
+        &mut self,
+        device_id: u32,
+        program_id: String,
+        value: (ProvingKey, StarkVerifyingKey<CoreSC>),
+    ) {
+        self.cache.push((device_id, program_id), value);
     }
 }
 

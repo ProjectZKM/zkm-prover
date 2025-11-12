@@ -9,6 +9,9 @@ use zkm_stark::{MachineProver, StarkGenericConfig};
 use zkm_stark::MachineProvingKey;
 
 #[cfg(feature = "gpu")]
+use zkm_gpu_core::cuda_runtime;
+
+#[cfg(feature = "gpu")]
 use zkm_gpu_prover::GpuProverHandle;
 use zkm_prover::ZKMProver;
 
@@ -19,7 +22,7 @@ impl RootProver {
     pub fn prove(&self, ctx: &ProveContext) -> anyhow::Result<Vec<u8>> {
         let segment = Self::prepare_segment(ctx)?;
         let prover = get_prover();
-        self.prove_with_prover(&prover, ctx, segment)
+        self.prove_with_prover(0, &prover, ctx, segment)
     }
 
     pub fn prove_from_segment(
@@ -28,7 +31,7 @@ impl RootProver {
         segment: Segment,
     ) -> anyhow::Result<Vec<u8>> {
         let prover = get_prover();
-        self.prove_with_prover(&prover, ctx, segment)
+        self.prove_with_prover(0, &prover, ctx, segment)
     }
 
     fn prepare_segment(ctx: &ProveContext) -> anyhow::Result<Segment> {
@@ -41,10 +44,12 @@ impl RootProver {
 
     fn prove_with_prover(
         &self,
+        idx: usize,
         prover: &ZKMProver<ProverComponents>,
         ctx: &ProveContext,
         segment: Segment,
     ) -> anyhow::Result<Vec<u8>> {
+        tracing::info!("use GPU {idx} to prove");
         let network_prove = NetworkProve::new(ctx.seg_size);
         let opts = network_prove.opts.core_opts;
 
@@ -84,14 +89,17 @@ impl RootProver {
             Segment::Record(record) => *record,
         };
 
+        tracing::info!("record loaded");
         let now = std::time::Instant::now();
         let mut cache = KEY_CACHE.lock();
-        let pk = if let Some((pk, _)) = cache.cache.get(&ctx.program_id) {
-            pk
-        } else {
+        tracing::info!("get key cache");
+        let device_id = idx as u32;
+        let (pk, _) = loop {
+            if let Some((pk, vk)) = cache.get(device_id, &ctx.program_id) {
+                break (pk, vk);
+            }
             let (pk, vk) = prover.core_prover.setup(&record.program);
-            cache.push(ctx.program_id.clone(), (pk, vk));
-            &cache.cache.get(&ctx.program_id).unwrap().0
+            cache.push(device_id, ctx.program_id.clone(), (pk, vk));
         };
         tracing::info!("setup time: {:?}", now.elapsed());
         let now = std::time::Instant::now();
@@ -121,19 +129,26 @@ impl RootProver {
         let proof = prover.core_prover.open(pk, main_data, &mut challenger)?;
         tracing::info!("open time: {:?}", now.elapsed());
 
+        tracing::info!("use GPU {idx} end");
+
         Ok(bincode::serialize(&proof)?)
     }
 
     #[cfg(feature = "gpu")]
     pub fn prove_with_gpu_handle(
         &self,
+        idx: usize,
         handle: &GpuProverHandle,
         ctx: &ProveContext,
     ) -> anyhow::Result<Vec<u8>> {
         let segment = Self::prepare_segment(ctx)?;
-        handle
-            .with_prover(|prover| self.prove_with_prover(prover, ctx, segment))
-            .map_err(|err| anyhow::anyhow!("failed to execute root proof on GPU: {err}"))?
+        let proof = handle
+            .with_prover(|prover| self.prove_with_prover(idx, prover, ctx, segment))
+            .map_err(|err| anyhow::anyhow!("failed to execute root proof on GPU: {err}"))??;
+        cuda_runtime::sync_device().map_err(|err| {
+            anyhow::anyhow!("failed to synchronize GPU {idx} after root prove: {err}")
+        })?;
+        Ok(proof)
     }
 
     fn decode_segment(bytes: &[u8]) -> anyhow::Result<Segment> {
