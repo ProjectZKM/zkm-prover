@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, Seek, Write};
 use std::sync::{
     mpsc::sync_channel,
-    {Arc, Mutex},
+    OnceLock, {Arc, Mutex},
 };
 use std::thread::ScopedJoinHandle;
 use std::time::Instant;
@@ -20,6 +20,7 @@ use zkm_core_machine::{
     shape::CoreShapeConfig,
     utils::{concurrency::TurnBasedSync, trace_checkpoint, ZKMCoreProverError},
 };
+use zkm_prover::components::ZKMProverComponents;
 use zkm_prover::{CoreSC, ZKMProver};
 use zkm_stark::koala_bear_poseidon2::KoalaBearPoseidon2;
 use zkm_stark::{
@@ -177,14 +178,15 @@ impl Executor {
         };
 
         let mut cache = KEY_CACHE.lock();
-        let vk = if let Some((_, vk)) = cache.cache.get(&ctx.program_id) {
+        let device_id = 0;
+        let vk = if let Some((_, vk)) = cache.get(device_id, &ctx.program_id) {
             tracing::info!("load vk from cache");
             vk
         } else {
             tracing::info!("No vk in cache, generate new keys");
             let (pk, vk) = prover.core_prover.setup(program);
-            cache.push(ctx.program_id.clone(), (pk, vk));
-            &cache.cache.get(&ctx.program_id).unwrap().1
+            cache.push(device_id, ctx.program_id.clone(), (pk, vk));
+            &cache.get(device_id, &ctx.program_id).unwrap().1
         };
         let vk_bytes = bincode::serialize(&vk)?;
         file::new(&format!("{}/vk.bin", ctx.base_dir)).write_all(&vk_bytes)?;
@@ -217,7 +219,7 @@ impl Executor {
     ) -> anyhow::Result<(u64, u32, Vec<u8>, Vec<(usize, Vec<u8>)>, Vec<u8>)> {
         // To prevent the executor from occupying a GPU exclusively,
         // the prover used here doesn’t use GPU resources.
-        let prover = get_prover();
+        let prover = get_executor();
         let mut network_prove = NetworkProve::new(ctx.seg_size);
 
         let inputs_data: Vec<Vec<u8>> = if !ctx.private_inputs.is_empty() {
@@ -266,16 +268,18 @@ impl Executor {
             program_cache.cache.get(&ctx.program_id).unwrap()
         };
 
-        let mut cache = KEY_CACHE.lock();
-        let vk = if let Some((_, vk)) = cache.cache.get(&ctx.program_id) {
-            tracing::info!("load vk from cache");
-            vk
-        } else {
-            tracing::info!("No vk in cache, generate new keys");
-            let (pk, vk) = prover.core_prover.setup(program);
-            cache.push(ctx.program_id.clone(), (pk, vk));
-            &cache.cache.get(&ctx.program_id).unwrap().1
-        };
+        // let mut cache = KEY_CACHE.lock();
+        // let device_id = 0;
+        // let vk = loop {
+        //     if let Some((_, vk)) = cache.get(device_id, &ctx.program_id) {
+        //         tracing::info!("load vk from cache");
+        //         break vk;
+        //     }
+        //     tracing::info!("No vk in cache, generate new keys");
+        //     let (pk, vk) = prover.core_prover.setup(program);
+        //     cache.push(device_id, ctx.program_id.clone(), (pk, vk));
+        // };
+        let (_, vk) = prover.core_prover.setup(program);
         let vk_bytes = bincode::serialize(&vk)?;
 
         let context = network_prove.context_builder.build();
@@ -284,7 +288,7 @@ impl Executor {
             &prover,
             ctx,
             program,
-            vk,
+            &vk,
             &network_prove.stdin,
             network_prove.opts.core_opts,
             context,
@@ -302,9 +306,9 @@ impl Executor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn split_with_context<'a, S: SegmentSink>(
+    pub fn split_with_context<'a, S: SegmentSink, C: ZKMProverComponents>(
         &self,
-        prover: &'a ZKMProver<ProverComponents>,
+        prover: &'a ZKMProver<C>,
         _ctx: &SplitContext,
         program: &Program,
         vk: &StarkVerifyingKey<CoreSC>,
@@ -623,4 +627,10 @@ fn write_file(path: String, buf: &[u8]) -> anyhow::Result<()> {
     std::fs::rename(tmp_path, path)?;
 
     Ok(())
+}
+
+static EXECUTOR: OnceLock<Arc<ZKMProver>> = OnceLock::new();
+
+pub fn get_executor() -> Arc<ZKMProver> {
+    EXECUTOR.get_or_init(|| Arc::new(ZKMProver::new())).clone()
 }

@@ -425,9 +425,17 @@ impl StageService for StageServiceSVC {
                 }
             }
             let mut max_prover_num = request.get_ref().max_prover_num;
-            if max_prover_num == 0 || max_prover_num > self.config.prover_addrs.len() as u32 {
-                max_prover_num = self.config.prover_addrs.len() as u32;
+            if !single_node {
+                let available_provers = self.config.prover_addrs.len() as u32;
+                if max_prover_num == 0 {
+                    // In single node mode, if 0, it means use all available provers.
+                    max_prover_num = available_provers;
+                } else {
+                    // Otherwise, cap the number to the maximum available provers.
+                    max_prover_num = std::cmp::min(max_prover_num, available_provers);
+                }
             }
+
             let receipt_inputs_path = if request.get_ref().receipt_inputs.is_empty() {
                 "".to_string()
             } else {

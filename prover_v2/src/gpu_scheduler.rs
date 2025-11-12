@@ -5,6 +5,7 @@ use std::thread::{self, JoinHandle};
 
 use anyhow::{anyhow, Context};
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
+use zkm_gpu_core::cuda_runtime;
 
 use crate::agg_prover::AggProver;
 use crate::contexts::{AggContext, ProveContext};
@@ -98,6 +99,7 @@ impl GpuJobPool {
 
             workers.push(thread::spawn(move || {
                 worker_loop(
+                    i,
                     handle,
                     worker_root_rx,
                     worker_agg_rx,
@@ -137,6 +139,7 @@ impl Drop for GpuJobPool {
 }
 
 fn worker_loop(
+    idx: usize,
     handle: Arc<GpuProverHandle>,
     root_rx: Receiver<JobMessage>,
     agg_rx: Receiver<JobMessage>,
@@ -163,8 +166,9 @@ fn worker_loop(
 
         match job {
             JobMessage::Root { ctx, result_tx } => {
+                tracing::info!("GPU {idx} processing root job");
                 let res = root_prover
-                    .prove_with_gpu_handle(&handle, &ctx)
+                    .prove_with_gpu_handle(idx, &handle, &ctx)
                     .map(|proof| (ctx.index, proof));
                 let _ = result_tx.send(res);
             }
@@ -173,6 +177,7 @@ fn worker_loop(
                 ctx,
                 result_tx,
             } => {
+                tracing::info!("GPU {idx} processing agg job");
                 let res = agg_prover.prove_with_gpu_handle(&handle, &ctx);
                 let _ = result_tx.send((job_id, res));
             }

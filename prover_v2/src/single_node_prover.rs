@@ -14,6 +14,7 @@ use common::file;
 use std::cmp;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use zkm_core_executor::ZKMReduceProof;
 #[cfg(feature = "gpu")]
@@ -36,7 +37,7 @@ struct UpperLayerState {
     expected_inputs: usize,
     processed_inputs: usize,
     chunk_count: usize,
-    buffer: VecDeque<Vec<u8>>,
+    buffer: BTreeMap<usize, Vec<u8>>,
 }
 
 #[cfg(feature = "gpu")]
@@ -51,7 +52,7 @@ impl UpperLayerState {
             expected_inputs,
             processed_inputs: 0,
             chunk_count,
-            buffer: VecDeque::new(),
+            buffer: BTreeMap::new(),
         }
     }
 }
@@ -66,7 +67,7 @@ struct StreamingAggregator {
     upper_layers: Vec<UpperLayerState>,
     final_result: Option<Vec<u8>>,
     next_job_id: u64,
-    pending_jobs: BTreeMap<u64, usize>,
+    pending_jobs: BTreeMap<u64, (usize, usize)>,
 }
 
 #[cfg(feature = "gpu")]
@@ -100,12 +101,17 @@ impl StreamingAggregator {
         &mut self,
         proofs: Vec<Vec<u8>>,
         is_first_chunk: bool,
+        output_index: usize,
     ) -> anyhow::Result<Vec<AggJobRequest>> {
-        self.push_first_layer(proofs, is_first_chunk, false)
+        self.push_first_layer(proofs, is_first_chunk, false, output_index)
     }
 
-    fn push_deferred(&mut self, proof: Vec<u8>) -> anyhow::Result<Vec<AggJobRequest>> {
-        self.push_first_layer(vec![proof], false, true)
+    fn push_deferred(
+        &mut self,
+        proof: Vec<u8>,
+        output_index: usize,
+    ) -> anyhow::Result<Vec<AggJobRequest>> {
+        self.push_first_layer(vec![proof], false, true, output_index)
     }
 
     fn push_first_layer(
@@ -113,6 +119,7 @@ impl StreamingAggregator {
         proofs: Vec<Vec<u8>>,
         mark_first_chunk: bool,
         is_deferred: bool,
+        output_index: usize,
     ) -> anyhow::Result<Vec<AggJobRequest>> {
         self.produced_first_layer += 1;
         let mut is_first_shard = false;
@@ -134,7 +141,7 @@ impl StreamingAggregator {
         } else {
             0
         };
-        Ok(vec![self.enqueue_job(ctx, next_layer)])
+        Ok(vec![self.enqueue_job(ctx, next_layer, output_index)])
     }
 
     fn handle_job_completion(
@@ -142,74 +149,94 @@ impl StreamingAggregator {
         job_id: u64,
         proof: Vec<u8>,
     ) -> anyhow::Result<Vec<AggJobRequest>> {
-        let Some(next_layer) = self.pending_jobs.remove(&job_id) else {
+        let Some((next_layer, index)) = self.pending_jobs.remove(&job_id) else {
             return Err(anyhow!("received completion for unknown aggregation job"));
         };
-        Ok(self.process_upper_layers(proof, next_layer))
+        Ok(self.process_upper_layers(proof, next_layer, index))
     }
 
-    fn process_upper_layers(&mut self, proof: Vec<u8>, start_layer: usize) -> Vec<AggJobRequest> {
-        if start_layer >= self.upper_layers.len() {
-            self.final_result = Some(proof);
-            return Vec::new();
-        }
-
+    fn process_upper_layers(
+        &mut self,
+        proof: Vec<u8>,
+        start_layer: usize,
+        index: usize,
+    ) -> Vec<AggJobRequest> {
         let mut jobs = Vec::new();
-        let idx = start_layer;
-        let current = proof;
+        let last_layer_index = self.upper_layers.len();
+        let mut current_proof = proof;
+        let mut current_index = index;
 
-        loop {
-            if idx >= self.upper_layers.len() {
-                self.final_result = Some(current);
+        for idx in start_layer..=last_layer_index {
+            if idx == last_layer_index {
+                self.final_result = Some(current_proof);
                 break;
             }
 
-            let layer_last = self.upper_layers.len() - 1;
+            let layer_last = last_layer_index - 1;
             let layer = &mut self.upper_layers[idx];
             layer.processed_inputs += 1;
-            layer.buffer.push_back(current);
+            layer.buffer.insert(current_index, current_proof);
             let is_final_chunk = layer.chunk_count == 1 && idx == layer_last;
+            let chunk_idx = current_index / 2;
+            let left_idx = chunk_idx * 2;
+            let right_idx = left_idx + 1;
 
-            if layer.buffer.len() >= 2 {
-                let left = layer.buffer.pop_front().unwrap();
-                let right = layer.buffer.pop_front().unwrap();
-                let ctx = AggContext {
-                    vk: Vec::new(),
-                    proofs: vec![left, right],
-                    is_complete: is_final_chunk,
-                    is_first_shard: false,
-                    is_leaf_layer: false,
-                    is_deferred: false,
+            let ctx_option =
+                if layer.buffer.contains_key(&left_idx) && layer.buffer.contains_key(&right_idx) {
+                    let left = layer.buffer.remove(&left_idx).unwrap();
+                    let right = layer.buffer.remove(&right_idx).unwrap();
+                    Some((
+                        chunk_idx,
+                        AggContext {
+                            vk: Vec::new(),
+                            proofs: vec![left, right],
+                            is_complete: is_final_chunk,
+                            is_first_shard: false,
+                            is_leaf_layer: false,
+                            is_deferred: false,
+                        },
+                    ))
+                } else if layer.processed_inputs == layer.expected_inputs {
+                    if let Some((&remaining_index, _)) = layer.buffer.iter().next() {
+                        let remaining = layer.buffer.remove(&remaining_index).unwrap();
+                        Some((
+                            remaining_index / 2,
+                            AggContext {
+                                vk: Vec::new(),
+                                proofs: vec![remaining],
+                                is_complete: is_final_chunk,
+                                is_first_shard: false,
+                                is_leaf_layer: false,
+                                is_deferred: false,
+                            },
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 };
-                jobs.push(self.enqueue_job(ctx, idx + 1));
+
+            if let Some((next_index, ctx)) = ctx_option {
+                jobs.push(self.enqueue_job(ctx, idx + 1, next_index));
+                break;
+            } else {
                 break;
             }
-
-            if layer.processed_inputs == layer.expected_inputs {
-                if let Some(remaining) = layer.buffer.pop_front() {
-                    let ctx = AggContext {
-                        vk: Vec::new(),
-                        proofs: vec![remaining],
-                        is_complete: is_final_chunk,
-                        is_first_shard: false,
-                        is_leaf_layer: false,
-                        is_deferred: false,
-                    };
-                    jobs.push(self.enqueue_job(ctx, idx + 1));
-                    break;
-                }
-            }
-
-            break;
         }
 
         jobs
     }
 
-    fn enqueue_job(&mut self, ctx: AggContext, next_layer: usize) -> AggJobRequest {
+    fn enqueue_job(
+        &mut self,
+        ctx: AggContext,
+        next_layer: usize,
+        output_index: usize,
+    ) -> AggJobRequest {
         let job_id = self.next_job_id;
         self.next_job_id += 1;
-        self.pending_jobs.insert(job_id, next_layer);
+        self.pending_jobs.insert(job_id, (next_layer, output_index));
         AggJobRequest { id: job_id, ctx }
     }
 
@@ -235,13 +262,16 @@ struct AggJobRequest {
 }
 
 #[cfg(feature = "gpu")]
-fn dispatch_agg_jobs(
+fn dispatch_agg_jobs<I>(
     dispatcher: &GpuJobDispatcher,
     result_tx: &mpsc::Sender<(u64, anyhow::Result<Vec<u8>>)>,
-    jobs: Vec<AggJobRequest>,
+    jobs: I,
     pending_gpu_jobs: &mut usize,
-) -> anyhow::Result<()> {
-    for job in jobs {
+) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = AggJobRequest>,
+{
+    for job in jobs.into_iter() {
         dispatcher
             .submit_agg(job.id, job.ctx, result_tx.clone())
             .map_err(|e| anyhow!("failed to dispatch aggregation job: {e}"))?;
@@ -256,6 +286,8 @@ fn run_aggregator(
     proof_rx: mpsc::Receiver<anyhow::Result<(usize, Vec<u8>)>>,
     snark_tx: Option<mpsc::Sender<Vec<u8>>>,
     dispatcher: GpuJobDispatcher,
+    remaining_roots: Arc<AtomicUsize>,
+    gpu_capacity: usize,
 ) -> anyhow::Result<Vec<u8>> {
     use std::time::Duration;
 
@@ -283,24 +315,47 @@ fn run_aggregator(
     deferred_inputs.sort_by_key(|(idx, _)| *idx);
     let mut deferred_processed = false;
 
+    let mut queued_jobs = VecDeque::new();
+    let mut allow_agg = false;
+
     let (agg_job_tx, agg_job_rx) = mpsc::channel::<(u64, anyhow::Result<Vec<u8>>)>();
     let mut pending_gpu_jobs = 0usize;
     let mut root_channel_open = true;
+    let mut deferred_next_index = chunk_ranges.len();
 
     loop {
+        if !allow_agg && remaining_roots.load(Ordering::Relaxed) <= gpu_capacity {
+            allow_agg = true;
+            dispatch_agg_jobs(
+                &dispatcher,
+                &agg_job_tx,
+                queued_jobs.drain(..),
+                &mut pending_gpu_jobs,
+            )?;
+        }
+
         while let Ok((job_id, result)) = agg_job_rx.try_recv() {
             pending_gpu_jobs = pending_gpu_jobs.saturating_sub(1);
             let followups = match result {
                 Ok(proof) => aggregator.handle_job_completion(job_id, proof)?,
                 Err(err) => return Err(err),
             };
-            dispatch_agg_jobs(&dispatcher, &agg_job_tx, followups, &mut pending_gpu_jobs)?;
+            if allow_agg {
+                dispatch_agg_jobs(&dispatcher, &agg_job_tx, followups, &mut pending_gpu_jobs)?;
+            } else {
+                queued_jobs.extend(followups);
+            }
         }
 
         if next_chunk_index == chunk_ranges.len() && !deferred_processed {
             for (_, proof) in deferred_inputs.iter() {
-                let jobs = aggregator.push_deferred(proof.clone())?;
-                dispatch_agg_jobs(&dispatcher, &agg_job_tx, jobs, &mut pending_gpu_jobs)?;
+                let jobs = aggregator.push_deferred(proof.clone(), deferred_next_index)?;
+                if allow_agg {
+                    dispatch_agg_jobs(&dispatcher, &agg_job_tx, jobs, &mut pending_gpu_jobs)?;
+                } else {
+                    queued_jobs.extend(jobs);
+                }
+                deferred_next_index += 1;
             }
             deferred_processed = true;
         }
@@ -322,8 +377,16 @@ fn run_aggregator(
                 for idx in start_idx..end_idx {
                     chunk_proofs.push(proofs.remove(&idx).unwrap());
                 }
-                let jobs = aggregator.push_normal_chunk(chunk_proofs, next_chunk_index == 0)?;
-                dispatch_agg_jobs(&dispatcher, &agg_job_tx, jobs, &mut pending_gpu_jobs)?;
+                let jobs = aggregator.push_normal_chunk(
+                    chunk_proofs,
+                    next_chunk_index == 0,
+                    next_chunk_index,
+                )?;
+                if allow_agg {
+                    dispatch_agg_jobs(&dispatcher, &agg_job_tx, jobs, &mut pending_gpu_jobs)?;
+                } else {
+                    queued_jobs.extend(jobs);
+                }
                 next_chunk_index += 1;
                 scheduled_chunk = true;
             } else {
@@ -338,6 +401,7 @@ fn run_aggregator(
             match proof_rx.recv_timeout(Duration::from_millis(10)) {
                 Ok(Ok((index, proof))) => {
                     proofs.insert(index, proof);
+                    remaining_roots.fetch_sub(1, Ordering::Relaxed);
                 }
                 Ok(Err(err)) => return Err(err),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -401,15 +465,19 @@ impl SingleNodeProver {
         let target_step = Step::from_i32(ctx.target_step)
             .ok_or_else(|| anyhow!("unsupported target step: {}", ctx.target_step))?;
 
-        let gpu_pool = {
+        let requested_workers = ctx.local_prover_threads.max(1);
+        let (gpu_pool, gpu_worker_count) = {
             let pool = get_local_provers();
             let total = pool.len();
             if total == 0 {
                 return Err(anyhow!("no local GPU provers detected"));
             }
-            GpuJobPool::new(pool, total)?
+            let workers = requested_workers.min(total);
+            let pool = GpuJobPool::new(pool, workers)?;
+            (pool, workers)
         };
         let gpu_dispatcher_main = gpu_pool.dispatcher();
+        let remaining_roots = Arc::new(AtomicUsize::new(0));
         let (segment_tx, segment_rx) = mpsc::channel::<(usize, Vec<u8>)>();
         let (proof_tx, proof_rx) = mpsc::channel::<anyhow::Result<(usize, Vec<u8>)>>();
         let (config_tx, config_rx) = mpsc::channel::<AggregatorConfig>();
@@ -442,8 +510,16 @@ impl SingleNodeProver {
 
         let dispatcher_for_agg = gpu_dispatcher_main.clone();
         let dispatcher_for_root = gpu_dispatcher_main.clone();
+        let remaining_for_agg = Arc::clone(&remaining_roots);
         let aggregator_handle = std::thread::spawn(move || {
-            let result = run_aggregator(config_rx, proof_rx, snark_tx, dispatcher_for_agg);
+            let result = run_aggregator(
+                config_rx,
+                proof_rx,
+                snark_tx,
+                dispatcher_for_agg,
+                remaining_for_agg,
+                gpu_worker_count,
+            );
             let _ = agg_result_tx.send(result);
         });
         drop(gpu_dispatcher_main);
@@ -474,12 +550,14 @@ impl SingleNodeProver {
             ..Default::default()
         };
         let proof_sender_for_root = proof_tx.clone();
+        let remaining_for_root = Arc::clone(&remaining_roots);
         let segment_handle = std::thread::spawn(move || -> anyhow::Result<()> {
             let template = worker_ctx;
             while let Ok((index, segment_bytes)) = segment_rx.recv() {
                 let mut ctx = template.clone();
                 ctx.index = index;
                 ctx.segment_bytes = segment_bytes;
+                remaining_for_root.fetch_add(1, Ordering::Relaxed);
                 dispatcher_for_root.submit_root(ctx, proof_sender_for_root.clone())?;
             }
             Ok(())
@@ -586,15 +664,13 @@ impl SingleNodeProver {
 
         // get keys from cache or generate new ones
         let mut cache = KEY_CACHE.lock();
-        let (pk, vk) = if let Some((pk, vk)) = cache.cache.get(&ctx.program_id) {
-            tracing::info!("load vk from cache");
-            (pk, vk)
-        } else {
-            tracing::info!("No vk in cache, generate new keys");
+        let device_id = 0;
+        let (pk, vk) = loop {
+            if let Some((pk, vk)) = cache.get(device_id, &ctx.program_id) {
+                break (pk, vk);
+            }
             let (pk, vk) = prover.core_prover.setup(program);
-            cache.push(ctx.program_id.clone(), (pk, vk));
-            let (pk, vk) = &cache.cache.get(&ctx.program_id).unwrap();
-            (pk, vk)
+            cache.push(device_id, ctx.program_id.clone(), (pk, vk));
         };
 
         let vk_bytes = bincode::serialize(&vk)?;
