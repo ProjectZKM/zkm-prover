@@ -30,7 +30,7 @@ use zkm_stark::{
 pub use crate::contexts::SplitContext;
 use crate::{
     get_prover, NetworkProve, ProverComponents, Segment, StateWithPublicValues,
-    FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE,
+    FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE, VK_CACHE,
 };
 
 pub trait SegmentSink: Send + Sync {
@@ -179,17 +179,12 @@ impl Executor {
             }
         };
 
-        let mut cache = KEY_CACHE.lock();
         let device_id = 0;
-        let vk = if let Some((_, vk)) = cache.get(device_id, &ctx.program_id) {
-            tracing::info!("load vk from cache");
-            vk
-        } else {
-            tracing::info!("No vk in cache, generate new keys");
-            let (pk, vk) = prover.core_prover.setup(&program);
-            cache.push(device_id, ctx.program_id.clone(), (pk, vk));
-            &cache.get(device_id, &ctx.program_id).unwrap().1
+        let entry = {
+            let mut cache = KEY_CACHE.lock();
+            cache.entry(device_id, ctx.program_id.clone())
         };
+        let (_, vk) = entry.get_or_init_with(|| prover.core_prover.setup(&program));
         let vk_bytes = bincode::serialize(&vk)?;
         file::new(&format!("{}/vk.bin", ctx.base_dir)).write_all(&vk_bytes)?;
 
@@ -251,37 +246,37 @@ impl Executor {
             tracing::info!("Write {} receipts", receipts.len());
         }
 
-        let mut program_cache = PROGRAM_CACHE.lock();
-        let program = if let Some(program) = program_cache.cache.get(&ctx.program_id) {
-            tracing::info!("load program from cache");
-            program
-        } else {
-            tracing::info!("No program in cache, generate new program");
-            let elf = if !ctx.elf.is_empty() {
-                ctx.elf.clone()
+        let program = {
+            let mut program_cache = PROGRAM_CACHE.lock();
+            if let Some(program) = program_cache.cache.get(&ctx.program_id) {
+                tracing::info!("load program from cache");
+                program.clone()
             } else {
-                let elf_path = ctx.elf_path.clone();
-                file::new(&elf_path).read()?
-            };
-            let program = prover
-                .get_program(&elf)
-                .map_err(|e| anyhow::Error::msg(e.to_string()))?;
-            program_cache.push(ctx.program_id.clone(), program);
-            program_cache.cache.get(&ctx.program_id).unwrap()
+                tracing::info!("No program in cache, generate new program");
+                let elf = if !ctx.elf.is_empty() {
+                    ctx.elf.clone()
+                } else {
+                    let elf_path = ctx.elf_path.clone();
+                    file::new(&elf_path).read()?
+                };
+                let program = prover
+                    .get_program(&elf)
+                    .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+                program_cache.push(ctx.program_id.clone(), program.clone());
+                program
+            }
         };
 
-        // let mut cache = KEY_CACHE.lock();
-        // let device_id = 0;
-        // let vk = loop {
-        //     if let Some((_, vk)) = cache.get(device_id, &ctx.program_id) {
-        //         tracing::info!("load vk from cache");
-        //         break vk;
-        //     }
-        //     tracing::info!("No vk in cache, generate new keys");
-        //     let (pk, vk) = prover.core_prover.setup(program);
-        //     cache.push(device_id, ctx.program_id.clone(), (pk, vk));
-        // };
-        let (_, vk) = prover.core_prover.setup(&program);
+        let vk = {
+            let mut vk_cache = VK_CACHE.lock();
+            if let Some(vk) = vk_cache.get(&ctx.program_id) {
+                vk
+            } else {
+                let (_, vk) = prover.core_prover.setup(&program);
+                vk_cache.push(ctx.program_id.clone(), vk.clone());
+                vk
+            }
+        };
         let vk_bytes = bincode::serialize(&vk)?;
 
         let context = network_prove.context_builder.build();

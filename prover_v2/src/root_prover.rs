@@ -93,16 +93,13 @@ impl RootProver {
 
         tracing::info!("record loaded");
         let now = std::time::Instant::now();
-        let mut cache = KEY_CACHE.lock();
-        tracing::info!("get key cache");
         let device_id = idx as u32;
-        let (pk, _) = loop {
-            if let Some((pk, vk)) = cache.get(device_id, &ctx.program_id) {
-                break (pk, vk);
-            }
-            let (pk, vk) = prover.core_prover.setup(&record.program);
-            cache.push(device_id, ctx.program_id.clone(), (pk, vk));
+        let entry = {
+            let mut cache = KEY_CACHE.lock();
+            cache.entry(device_id, ctx.program_id.clone())
         };
+        tracing::info!("get key cache");
+        let (pk, _) = entry.get_or_init_with(|| prover.core_prover.setup(&record.program));
         tracing::info!("setup time: {:?}", now.elapsed());
         let now = std::time::Instant::now();
         prover.core_prover.machine().generate_dependencies(

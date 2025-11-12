@@ -116,31 +116,50 @@ type ProvingKey =
     StarkProvingKeyDevice<CoreSC, FieldMerkleTreeDeviceCommitter<DeviceHasherKoalaBear>>;
 type KeyCacheKey = (u32, String);
 
+pub struct KeyCacheEntry {
+    value: OnceLock<(ProvingKey, StarkVerifyingKey<CoreSC>)>,
+}
+
+impl KeyCacheEntry {
+    pub fn new() -> Self {
+        Self {
+            value: OnceLock::new(),
+        }
+    }
+
+    pub fn get_or_init_with<F>(&self, init: F) -> (&ProvingKey, &StarkVerifyingKey<CoreSC>)
+    where
+        F: FnOnce() -> (ProvingKey, StarkVerifyingKey<CoreSC>),
+    {
+        self.value.get_or_init(init);
+        let pair = self.value.get().expect("key cache entry was initialized");
+        (&pair.0, &pair.1)
+    }
+}
+
 pub struct StarkKeyCache {
-    pub cache: LruCache<KeyCacheKey, (ProvingKey, StarkVerifyingKey<CoreSC>)>,
+    pub cache: LruCache<KeyCacheKey, Arc<KeyCacheEntry>>,
 }
 
 impl StarkKeyCache {
     pub fn new(size: usize) -> Self {
-        let cache = LruCache::<KeyCacheKey, (ProvingKey, StarkVerifyingKey<CoreSC>)>::new(
-            NonZeroUsize::new(size).unwrap(),
-        );
+        let cache =
+            LruCache::<KeyCacheKey, Arc<KeyCacheEntry>>::new(NonZeroUsize::new(size).unwrap());
         Self { cache }
     }
-    pub fn get(
-        &mut self,
-        device_id: u32,
-        program_id: &str,
-    ) -> Option<&(ProvingKey, StarkVerifyingKey<CoreSC>)> {
-        self.cache.get(&(device_id, program_id.to_owned()))
+
+    pub fn get(&mut self, device_id: u32, program_id: &str) -> Option<Arc<KeyCacheEntry>> {
+        self.cache.get(&(device_id, program_id.to_owned())).cloned()
     }
-    pub fn push(
-        &mut self,
-        device_id: u32,
-        program_id: String,
-        value: (ProvingKey, StarkVerifyingKey<CoreSC>),
-    ) {
-        self.cache.push((device_id, program_id), value);
+
+    pub fn entry(&mut self, device_id: u32, program_id: String) -> Arc<KeyCacheEntry> {
+        if let Some(entry) = self.cache.get(&(device_id, program_id.clone())) {
+            entry.clone()
+        } else {
+            let entry = Arc::new(KeyCacheEntry::new());
+            self.cache.push((device_id, program_id), entry.clone());
+            entry
+        }
     }
 }
 
@@ -161,11 +180,31 @@ impl ProgramCache {
     }
 }
 
+pub struct VkCache {
+    pub cache: LruCache<String, StarkVerifyingKey<CoreSC>>,
+}
+
+impl VkCache {
+    pub fn new(size: usize) -> Self {
+        let cache =
+            LruCache::<String, StarkVerifyingKey<CoreSC>>::new(NonZeroUsize::new(size).unwrap());
+        Self { cache }
+    }
+    pub fn get(&mut self, key: &String) -> Option<StarkVerifyingKey<CoreSC>> {
+        self.cache.get(key).cloned()
+    }
+    pub fn push(&mut self, key: String, v: StarkVerifyingKey<CoreSC>) {
+        self.cache.push(key.clone(), v);
+    }
+}
+
 const DEFAULT_CACHE_SIZE: usize = 5;
 
 lazy_static::lazy_static! {
     pub static ref KEY_CACHE: Mutex<StarkKeyCache> =
         Mutex::new(StarkKeyCache::new(DEFAULT_CACHE_SIZE));
-        pub static ref PROGRAM_CACHE: Mutex<ProgramCache> =
+    pub static ref PROGRAM_CACHE: Mutex<ProgramCache> =
         Mutex::new(ProgramCache::new(DEFAULT_CACHE_SIZE));
+    pub static ref VK_CACHE: Mutex<VkCache> =
+        Mutex::new(VkCache::new(DEFAULT_CACHE_SIZE));
 }

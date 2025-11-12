@@ -663,15 +663,12 @@ impl SingleNodeProver {
         };
 
         // get keys from cache or generate new ones
-        let mut cache = KEY_CACHE.lock();
         let device_id = 0;
-        let (pk, vk) = loop {
-            if let Some((pk, vk)) = cache.get(device_id, &ctx.program_id) {
-                break (pk, vk);
-            }
-            let (pk, vk) = prover.core_prover.setup(program);
-            cache.push(device_id, ctx.program_id.clone(), (pk, vk));
+        let entry = {
+            let mut cache = KEY_CACHE.lock();
+            cache.entry(device_id, ctx.program_id.clone())
         };
+        let (pk, vk) = entry.get_or_init_with(|| prover.core_prover.setup(program));
 
         let vk_bytes = bincode::serialize(&vk)?;
         file::new(&format!("{}/vk.bin", ctx.base_dir)).write_all(&vk_bytes)?;
