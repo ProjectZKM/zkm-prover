@@ -202,9 +202,9 @@ const DEFAULT_CACHE_SIZE: usize = 5;
 
 lazy_static::lazy_static! {
     pub static ref KEY_CACHE: Mutex<StarkKeyCache> =
-        Mutex::new(StarkKeyCache::new(DEFAULT_CACHE_SIZE));
+        Mutex::new(StarkKeyCache::new(DEFAULT_CACHE_SIZE * 8));
     pub static ref PROGRAM_CACHE: Mutex<ProgramCache> =
-        Mutex::new(ProgramCache::new(DEFAULT_CACHE_SIZE));
+        Mutex::new(ProgramCache::new(DEFAULT_CACHE_SIZE * 8));
     pub static ref VK_CACHE: Mutex<VkCache> =
         Mutex::new(VkCache::new(DEFAULT_CACHE_SIZE));
 }

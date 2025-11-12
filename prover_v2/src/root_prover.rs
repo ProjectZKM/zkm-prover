@@ -49,7 +49,7 @@ impl RootProver {
         ctx: &ProveContext,
         segment: Segment,
     ) -> anyhow::Result<Vec<u8>> {
-        tracing::info!("use GPU {idx} to prove");
+        tracing::info!("GPU {idx} to prove");
         let network_prove = NetworkProve::new(ctx.seg_size);
         let opts = network_prove.opts.core_opts;
 
@@ -58,10 +58,10 @@ impl RootProver {
                 let program = {
                     let mut program_cache = PROGRAM_CACHE.lock();
                     if let Some(program) = program_cache.cache.get(&ctx.program_id) {
-                        tracing::info!("load program from cache");
+                        tracing::info!("GPU {idx} load program from cache");
                         program.clone()
                     } else {
-                        tracing::info!("No program in cache, generate new program");
+                        tracing::info!("GPU {idx} No program in cache, generate new program");
                         let elf = if !ctx.elf.is_empty() {
                             ctx.elf.clone()
                         } else {
@@ -91,44 +91,47 @@ impl RootProver {
             Segment::Record(record) => *record,
         };
 
-        tracing::info!("record loaded");
+        tracing::info!("GPU {idx} record loaded");
         let now = std::time::Instant::now();
         let device_id = idx as u32;
         let entry = {
             let mut cache = KEY_CACHE.lock();
             cache.entry(device_id, ctx.program_id.clone())
         };
-        tracing::info!("get key cache");
-        let (pk, _) = entry.get_or_init_with(|| prover.core_prover.setup(&record.program));
-        tracing::info!("setup time: {:?}", now.elapsed());
+        tracing::info!("GPU {idx} get key cache");
+        let (pk, _) = entry.get_or_init_with(|| {
+            tracing::info!("GPU {idx} setup");
+            prover.core_prover.setup(&record.program)
+        });
+        tracing::info!("GPU {idx} setup time: {:?}", now.elapsed());
         let now = std::time::Instant::now();
         prover.core_prover.machine().generate_dependencies(
             std::slice::from_mut(&mut record),
             &opts,
             None,
         );
-        tracing::info!("generate dependencies time: {:?}", now.elapsed());
+        tracing::info!("GPU {idx} generate dependencies time: {:?}", now.elapsed());
 
         // Fix the shape of the record.
         let now = std::time::Instant::now();
         if let Some(shape_config) = &prover.core_shape_config {
             shape_config.fix_shape(&mut record)?;
         }
-        tracing::info!("fix shape time: {:?}", now.elapsed());
+        tracing::info!("GPU {idx} fix shape time: {:?}", now.elapsed());
         let now = std::time::Instant::now();
         let main_trace = prover.core_prover.generate_traces(&record);
-        tracing::info!("generate traces time: {:?}", now.elapsed());
+        tracing::info!("GPU {idx} generate traces time: {:?}", now.elapsed());
 
         let mut challenger = prover.core_prover.config().challenger();
         pk.observe_into(&mut challenger);
         let now = std::time::Instant::now();
         let main_data = prover.core_prover.commit(&record, main_trace);
-        tracing::info!("commit time: {:?}", now.elapsed());
+        tracing::info!("GPU {idx} commit time: {:?}", now.elapsed());
         let now = std::time::Instant::now();
         let proof = prover.core_prover.open(pk, main_data, &mut challenger)?;
-        tracing::info!("open time: {:?}", now.elapsed());
+        tracing::info!("GPU {idx} open time: {:?}", now.elapsed());
 
-        tracing::info!("use GPU {idx} end");
+        tracing::info!("GPU {idx} end");
 
         Ok(bincode::serialize(&proof)?)
     }
@@ -144,9 +147,9 @@ impl RootProver {
         let proof = handle
             .with_prover(|prover| self.prove_with_prover(idx, prover, ctx, segment))
             .map_err(|err| anyhow::anyhow!("failed to execute root proof on GPU: {err}"))??;
-        cuda_runtime::sync_device().map_err(|err| {
-            anyhow::anyhow!("failed to synchronize GPU {idx} after root prove: {err}")
-        })?;
+        // cuda_runtime::sync_device().map_err(|err| {
+        //     anyhow::anyhow!("failed to synchronize GPU {idx} after root prove: {err}")
+        // })?;
         Ok(proof)
     }
 
