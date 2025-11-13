@@ -21,16 +21,16 @@ plonky2x-derive = { git = "https://github.com/ProjectZKM/succinctx.git", branch 
 [patch."https://github.com/zkMIPS/curta.git"]
 curta = { git = "https://github.com/ProjectZKM/curta.git", branch = "zkm" }
 
-[path."https://github.com/ProjectZKM/Ziren"]
-zkm-core-machine = { path = "../Ziren/crates/core/machine" }
-zkm-core-executor = { path = "../Ziren/crates/core/executor" }
-zkm-stark = { path = "../Ziren/crates/stark" }
-zkm-prover = { path = "../Ziren/crates/prover" }
-zkm-recursion-compiler = { path = "../Ziren/crates/recursion/compiler" }
-zkm-recursion-core = { path = "../Ziren/crates/recursion/core" }
-zkm-recursion-circuit = { path = "../Ziren/crates/recursion/circuit" }
-zkm-sdk = { path = "../Ziren/crates/sdk" }
-
-[patch."https://github.com/ProjectZKM/ziren-gpu"]
-zkm-gpu-prover = { path = "../../zkm-gpu/ziren-gpu/prover" }
-zkm-gpu-core = { path = "../../zkm-gpu/ziren-gpu/core" }
+#[path."https://github.com/ProjectZKM/Ziren"]
+#zkm-core-machine = { path = "../Ziren/crates/core/machine" }
+#zkm-core-executor = { path = "../Ziren/crates/core/executor" }
+#zkm-stark = { path = "../Ziren/crates/stark" }
+#zkm-prover = { path = "../Ziren/crates/prover" }
+#zkm-recursion-compiler = { path = "../Ziren/crates/recursion/compiler" }
+#zkm-recursion-core = { path = "../Ziren/crates/recursion/core" }
+#zkm-recursion-circuit = { path = "../Ziren/crates/recursion/circuit" }
+#zkm-sdk = { path = "../Ziren/crates/sdk" }
+#
+#[patch."https://github.com/ProjectZKM/ziren-gpu"]
+#zkm-gpu-prover = { path = "../../zkm-gpu/ziren-gpu/prover" }
+#zkm-gpu-core = { path = "../../zkm-gpu/ziren-gpu/core" }
