@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
-use zkm_core_executor::ZKMReduceProof;
+use zkm_core_executor::{ExecutionRecord, ZKMReduceProof};
 #[cfg(feature = "gpu")]
 use zkm_gpu_prover::MultiGpuProver;
 use zkm_prover::ZKMVerifyingKey;
@@ -478,7 +478,7 @@ impl SingleNodeProver {
         };
         let gpu_dispatcher_main = gpu_pool.dispatcher();
         let remaining_roots = Arc::new(AtomicUsize::new(0));
-        let (segment_tx, segment_rx) = mpsc::channel::<(usize, Vec<u8>)>();
+        let (segment_tx, segment_rx) = mpsc::channel::<(usize, ExecutionRecord)>();
         let (proof_tx, proof_rx) = mpsc::channel::<anyhow::Result<(usize, Vec<u8>)>>();
         let (config_tx, config_rx) = mpsc::channel::<AggregatorConfig>();
         let (agg_result_tx, agg_result_rx) = mpsc::channel::<anyhow::Result<Vec<u8>>>();
@@ -553,10 +553,11 @@ impl SingleNodeProver {
         let remaining_for_root = Arc::clone(&remaining_roots);
         let segment_handle = std::thread::spawn(move || -> anyhow::Result<()> {
             let template = worker_ctx;
-            while let Ok((index, segment_bytes)) = segment_rx.recv() {
+            while let Ok((index, record)) = segment_rx.recv() {
                 let mut ctx = template.clone();
                 ctx.index = index;
-                ctx.segment_bytes = segment_bytes;
+                ctx.segment_bytes.clear();
+                ctx.segment_obj = Some(record);
                 remaining_for_root.fetch_add(1, Ordering::Relaxed);
                 dispatcher_for_root.submit_root(ctx, proof_sender_for_root.clone())?;
             }
