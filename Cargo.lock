@@ -74,6 +74,7 @@ dependencies = [
 [[package]]
 name = "air"
 version = "0.1.0"
+source = "git+https://github.com/ProjectZKM/ziren-gpu?branch=feat%2Fmulti-provers#c8f187b988898dc6d6f2c90f519738117ed508a9"
 dependencies = [
  "lazy_static",
  "p3-air",
@@ -10184,6 +10185,7 @@ dependencies = [
 [[package]]
 name = "zkm-gpu-core"
 version = "0.1.0"
+source = "git+https://github.com/ProjectZKM/ziren-gpu?branch=feat%2Fmulti-provers#c8f187b988898dc6d6f2c90f519738117ed508a9"
 dependencies = [
  "air",
  "bincode",
@@ -10228,6 +10230,7 @@ dependencies = [
 [[package]]
 name = "zkm-gpu-prover"
 version = "0.1.0"
+source = "git+https://github.com/ProjectZKM/ziren-gpu?branch=feat%2Fmulti-provers#c8f187b988898dc6d6f2c90f519738117ed508a9"
 dependencies = [
  "bincode",
  "clap",
