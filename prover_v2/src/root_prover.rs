@@ -52,24 +52,28 @@ impl RootProver {
         ctx: &ProveContext,
         mut record: ExecutionRecord,
     ) -> anyhow::Result<Vec<u8>> {
-        tracing::info!("GPU {idx} to prove");
+        let segment_index = ctx.index;
+        tracing::info!("GPU {idx} starting root proof for segment {segment_index}");
         let network_prove = NetworkProve::new(ctx.seg_size);
         let opts = network_prove.opts.core_opts;
 
-        tracing::info!("GPU {idx} record loaded");
+        tracing::info!("GPU {idx} segment {segment_index}: record loaded");
         let now = std::time::Instant::now();
         let device_id = idx as u32;
         let entry = {
             let mut cache = KEY_CACHE.lock();
             cache.entry(device_id, ctx.program_id.clone())
         };
-        tracing::info!("GPU {idx} get key cache");
+        tracing::info!("GPU {idx} segment {segment_index}: acquiring key cache entry");
         let (pk, _) = entry.get_or_init_with(|| {
-            tracing::info!("GPU {idx} setup");
+            tracing::info!("GPU {idx} segment {segment_index}: running setup");
             prover.core_prover.setup(&record.program)
         });
         tracing::info!("GPU {idx} setup time: {:?}", now.elapsed());
         let now = std::time::Instant::now();
+        tracing::info!(
+            "GPU {idx} segment {segment_index}: generating dependencies"
+        );
         prover.core_prover.machine().generate_dependencies(
             std::slice::from_mut(&mut record),
             &opts,
@@ -80,23 +84,27 @@ impl RootProver {
         // Fix the shape of the record.
         let now = std::time::Instant::now();
         if let Some(shape_config) = &prover.core_shape_config {
+            tracing::info!("GPU {idx} segment {segment_index}: fixing shape");
             shape_config.fix_shape(&mut record)?;
         }
         tracing::info!("GPU {idx} fix shape time: {:?}", now.elapsed());
         let now = std::time::Instant::now();
+        tracing::info!("GPU {idx} segment {segment_index}: generating traces");
         let main_trace = prover.core_prover.generate_traces(&record);
         tracing::info!("GPU {idx} generate traces time: {:?}", now.elapsed());
 
         let mut challenger = prover.core_prover.config().challenger();
         pk.observe_into(&mut challenger);
         let now = std::time::Instant::now();
+        tracing::info!("GPU {idx} segment {segment_index}: committing main trace");
         let main_data = prover.core_prover.commit(&record, main_trace);
         tracing::info!("GPU {idx} commit time: {:?}", now.elapsed());
         let now = std::time::Instant::now();
+        tracing::info!("GPU {idx} segment {segment_index}: opening proof");
         let proof = prover.core_prover.open(pk, main_data, &mut challenger)?;
         tracing::info!("GPU {idx} open time: {:?}", now.elapsed());
 
-        tracing::info!("GPU {idx} end");
+        tracing::info!("GPU {idx} finished segment {segment_index}");
 
         Ok(bincode::serialize(&proof)?)
     }
