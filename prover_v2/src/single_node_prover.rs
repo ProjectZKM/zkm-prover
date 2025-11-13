@@ -12,7 +12,7 @@ use crate::{get_prover, NetworkProve, FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM
 use anyhow::{anyhow, Context};
 use common::file;
 use std::cmp;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
@@ -33,41 +33,129 @@ struct AggregatorConfig {
 }
 
 #[cfg(feature = "gpu")]
-struct UpperLayerState {
-    expected_inputs: usize,
-    processed_inputs: usize,
-    chunk_count: usize,
-    buffer: BTreeMap<usize, Vec<u8>>,
-}
-
-#[cfg(feature = "gpu")]
-impl UpperLayerState {
-    fn new(expected_inputs: usize) -> Self {
-        let chunk_count = if expected_inputs == 0 {
-            0
-        } else {
-            (expected_inputs + 1) / 2
-        };
-        Self {
-            expected_inputs,
-            processed_inputs: 0,
-            chunk_count,
-            buffer: BTreeMap::new(),
-        }
-    }
-}
-
-#[cfg(feature = "gpu")]
 struct StreamingAggregator {
     vk_bytes: Vec<u8>,
     is_complete: bool,
     first_layer_expected: usize,
     produced_first_layer: usize,
     first_shard_emitted: bool,
-    upper_layers: Vec<UpperLayerState>,
+    plan: AggregationPlan,
+    nodes: Vec<AggNodeState>,
     final_result: Option<Vec<u8>>,
     next_job_id: u64,
-    pending_jobs: BTreeMap<u64, (usize, usize)>,
+    pending_jobs: HashMap<u64, usize>,
+}
+
+#[cfg(feature = "gpu")]
+struct AggregationPlan {
+    level_counts: Vec<usize>,
+    level_offsets: Vec<usize>,
+    parents: Vec<Option<(usize, usize)>>,
+    expected_inputs: Vec<usize>,
+    layers: Vec<usize>,
+    indices: Vec<usize>,
+}
+
+#[cfg(feature = "gpu")]
+impl AggregationPlan {
+    fn new(total_leaves: usize) -> Self {
+        let mut level_counts = Vec::new();
+        let mut count = cmp::max(total_leaves, 1);
+        loop {
+            level_counts.push(count);
+            if count == 1 {
+                break;
+            }
+            count = (count + 1) / 2;
+        }
+
+        let mut level_offsets = Vec::with_capacity(level_counts.len());
+        let mut offset = 0usize;
+        for &c in &level_counts {
+            level_offsets.push(offset);
+            offset += c;
+        }
+        let total_nodes = offset;
+        let mut parents = vec![None; total_nodes];
+        let mut expected_inputs = vec![0; total_nodes];
+        let mut layers = vec![0; total_nodes];
+        let mut indices = vec![0; total_nodes];
+
+        for (layer, &count) in level_counts.iter().enumerate() {
+            let base = level_offsets[layer];
+            for idx in 0..count {
+                let node_id = base + idx;
+                layers[node_id] = layer;
+                indices[node_id] = idx;
+            }
+        }
+
+        for layer in 0..level_counts.len().saturating_sub(1) {
+            let child_base = level_offsets[layer];
+            let parent_base = level_offsets[layer + 1];
+            for idx in 0..level_counts[layer] {
+                let child_id = child_base + idx;
+                let parent_idx = idx / 2;
+                let slot = idx % 2;
+                let parent_id = parent_base + parent_idx;
+                parents[child_id] = Some((parent_id, slot));
+                expected_inputs[parent_id] += 1;
+            }
+        }
+
+        Self {
+            level_counts,
+            level_offsets,
+            parents,
+            expected_inputs,
+            layers,
+            indices,
+        }
+    }
+
+    fn total_nodes(&self) -> usize {
+        self.parents.len()
+    }
+
+    fn leaf_node_id(&self, index: usize) -> usize {
+        self.level_offsets[0] + index
+    }
+
+    fn parent(&self, node_id: usize) -> Option<(usize, usize)> {
+        self.parents.get(node_id).copied().flatten()
+    }
+
+    fn expected_inputs(&self, node_id: usize) -> usize {
+        *self.expected_inputs.get(node_id).unwrap_or(&0)
+    }
+
+    fn is_leaf(&self, node_id: usize) -> bool {
+        self.layers.get(node_id).copied().unwrap_or(0) == 0
+    }
+
+    fn is_top_level(&self, node_id: usize) -> bool {
+        if let Some(layer) = self.layers.get(node_id) {
+            layer + 1 == self.level_counts.len()
+        } else {
+            false
+        }
+    }
+
+    fn layer_of(&self, node_id: usize) -> usize {
+        self.layers.get(node_id).copied().unwrap_or(0)
+    }
+
+    fn index_within_layer(&self, node_id: usize) -> usize {
+        self.indices.get(node_id).copied().unwrap_or(0)
+    }
+}
+
+#[cfg(feature = "gpu")]
+#[derive(Clone, Default)]
+struct AggNodeState {
+    received_inputs: usize,
+    inputs: [Option<Vec<u8>>; 2],
+    job_inflight: bool,
 }
 
 #[cfg(feature = "gpu")]
@@ -77,12 +165,8 @@ impl StreamingAggregator {
         let chunk_ranges = (total_segments + first_layer_batch_size - 1) / first_layer_batch_size;
 
         let first_layer_expected = chunk_ranges + deferred_len;
-        let mut upper_layers = Vec::new();
-        let mut remaining = first_layer_expected;
-        while remaining > 1 {
-            upper_layers.push(UpperLayerState::new(remaining));
-            remaining = (remaining + 1) / 2;
-        }
+        let plan = AggregationPlan::new(cmp::max(first_layer_expected, 1));
+        let nodes = vec![AggNodeState::default(); plan.total_nodes()];
 
         Self {
             vk_bytes,
@@ -90,10 +174,11 @@ impl StreamingAggregator {
             first_layer_expected,
             produced_first_layer: 0,
             first_shard_emitted: false,
-            upper_layers,
+            plan,
+            nodes,
             final_result: None,
             next_job_id: 0,
-            pending_jobs: BTreeMap::new(),
+            pending_jobs: HashMap::new(),
         }
     }
 
@@ -103,7 +188,7 @@ impl StreamingAggregator {
         is_first_chunk: bool,
         output_index: usize,
     ) -> anyhow::Result<Vec<AggJobRequest>> {
-        self.push_first_layer(proofs, is_first_chunk, false, output_index)
+        self.schedule_leaf_job(proofs, is_first_chunk, false, output_index)
     }
 
     fn push_deferred(
@@ -111,16 +196,19 @@ impl StreamingAggregator {
         proof: Vec<u8>,
         output_index: usize,
     ) -> anyhow::Result<Vec<AggJobRequest>> {
-        self.push_first_layer(vec![proof], false, true, output_index)
+        self.schedule_leaf_job(vec![proof], false, true, output_index)
     }
 
-    fn push_first_layer(
+    fn schedule_leaf_job(
         &mut self,
         proofs: Vec<Vec<u8>>,
         mark_first_chunk: bool,
         is_deferred: bool,
         output_index: usize,
     ) -> anyhow::Result<Vec<AggJobRequest>> {
+        if output_index >= self.first_layer_expected {
+            return Err(anyhow!("invalid leaf index {output_index}"));
+        }
         self.produced_first_layer += 1;
         let mut is_first_shard = false;
         if !is_deferred && mark_first_chunk && !self.first_shard_emitted {
@@ -128,20 +216,16 @@ impl StreamingAggregator {
             is_first_shard = true;
         }
 
+        let node_id = self.plan.leaf_node_id(output_index);
         let ctx = AggContext {
             vk: self.vk_bytes.clone(),
             proofs,
-            is_complete: self.is_complete,
+            is_complete: self.is_complete && self.plan.is_top_level(node_id),
             is_first_shard,
             is_leaf_layer: true,
             is_deferred,
         };
-        let next_layer = if self.upper_layers.is_empty() {
-            self.upper_layers.len()
-        } else {
-            0
-        };
-        Ok(vec![self.enqueue_job(ctx, next_layer, output_index)])
+        Ok(vec![self.enqueue_job(node_id, ctx)])
     }
 
     fn handle_job_completion(
@@ -149,134 +233,95 @@ impl StreamingAggregator {
         job_id: u64,
         proof: Vec<u8>,
     ) -> anyhow::Result<Vec<AggJobRequest>> {
-        let Some((next_layer, index)) = self.pending_jobs.remove(&job_id) else {
+        let Some(node_id) = self.pending_jobs.remove(&job_id) else {
             return Err(anyhow!("received completion for unknown aggregation job"));
         };
+        if let Some(state) = self.nodes.get_mut(node_id) {
+            state.job_inflight = false;
+        }
         tracing::info!(
-            "Aggregator job {} completed, advancing to layer {} index {}",
+            "Aggregator job {} completed for node {} layer {} index {}",
             job_id,
-            next_layer,
-            index
+            node_id,
+            self.plan.layer_of(node_id),
+            self.plan.index_within_layer(node_id)
         );
-        Ok(self.process_upper_layers(proof, next_layer, index))
+        Ok(self.propagate_output(node_id, proof))
     }
 
-    fn process_upper_layers(
-        &mut self,
-        proof: Vec<u8>,
-        start_layer: usize,
-        index: usize,
-    ) -> Vec<AggJobRequest> {
-        let mut jobs = Vec::new();
-        let last_layer_index = self.upper_layers.len();
-        let mut current_proof = proof;
-        let mut current_index = index;
-
-        for idx in start_layer..=last_layer_index {
-            if idx == last_layer_index {
-                tracing::info!(
-                    "Aggregator produced final result at layer {} index {}",
-                    idx,
-                    current_index
-                );
-                self.final_result = Some(current_proof);
-                break;
-            }
-
-            let layer_last = last_layer_index - 1;
-            let layer = &mut self.upper_layers[idx];
-            layer.processed_inputs += 1;
-            layer.buffer.insert(current_index, current_proof);
+    fn propagate_output(&mut self, node_id: usize, proof: Vec<u8>) -> Vec<AggJobRequest> {
+        if let Some((parent_id, slot)) = self.plan.parent(node_id) {
             tracing::info!(
-                "Aggregator layer {} progress {}/{} (chunk_count={})",
-                idx,
-                layer.processed_inputs,
-                layer.expected_inputs,
-                layer.chunk_count
+                "Aggregator node {} sending proof to parent {} slot {}",
+                node_id,
+                parent_id,
+                slot
             );
-            let is_final_chunk = layer.chunk_count == 1 && idx == layer_last;
-            let chunk_idx = current_index / 2;
-            let left_idx = chunk_idx * 2;
-            let right_idx = left_idx + 1;
+            if let Some(state) = self.nodes.get_mut(parent_id) {
+                state.inputs[slot] = Some(proof);
+                state.received_inputs += 1;
+            }
+            self.try_schedule_node(parent_id)
+        } else {
+            tracing::info!("Aggregator reached final result at node {}", node_id);
+            self.final_result = Some(proof);
+            Vec::new()
+        }
+    }
 
-            let ctx_option =
-                if layer.buffer.contains_key(&left_idx) && layer.buffer.contains_key(&right_idx) {
-                    let left = layer.buffer.remove(&left_idx).unwrap();
-                    let right = layer.buffer.remove(&right_idx).unwrap();
-                    tracing::info!(
-                        "Aggregator layer {} ready chunk {} (left {}, right {})",
-                        idx,
-                        chunk_idx,
-                        left_idx,
-                        right_idx
-                    );
-                    Some((
-                        chunk_idx,
-                        AggContext {
-                            vk: Vec::new(),
-                            proofs: vec![left, right],
-                            is_complete: is_final_chunk,
-                            is_first_shard: false,
-                            is_leaf_layer: false,
-                            is_deferred: false,
-                        },
-                    ))
-                } else if layer.processed_inputs == layer.expected_inputs {
-                    if let Some((&remaining_index, _)) = layer.buffer.iter().next() {
-                        let remaining = layer.buffer.remove(&remaining_index).unwrap();
-                        tracing::info!(
-                            "Aggregator layer {} last remaining chunk {}",
-                            idx,
-                            remaining_index
-                        );
-                        Some((
-                            remaining_index / 2,
-                            AggContext {
-                                vk: Vec::new(),
-                                proofs: vec![remaining],
-                                is_complete: is_final_chunk,
-                                is_first_shard: false,
-                                is_leaf_layer: false,
-                                is_deferred: false,
-                            },
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-            if let Some((next_index, ctx)) = ctx_option {
-                jobs.push(self.enqueue_job(ctx, idx + 1, next_index));
-                break;
-            } else {
-                tracing::debug!(
-                    "Aggregator layer {} waiting for more inputs (buffer size {})",
-                    idx,
-                    layer.buffer.len()
-                );
-                break;
+    fn try_schedule_node(&mut self, node_id: usize) -> Vec<AggJobRequest> {
+        if self.plan.is_leaf(node_id) {
+            return Vec::new();
+        }
+        let expected = self.plan.expected_inputs(node_id);
+        if expected == 0 {
+            return Vec::new();
+        }
+        let state = &mut self.nodes[node_id];
+        if state.job_inflight || state.received_inputs < expected {
+            tracing::debug!(
+                "Aggregator node {} waiting for inputs {}/{}",
+                node_id,
+                state.received_inputs,
+                expected
+            );
+            return Vec::new();
+        }
+        let mut proofs = Vec::with_capacity(expected);
+        for slot in 0..2 {
+            if let Some(data) = state.inputs[slot].take() {
+                proofs.push(data);
+                if proofs.len() == expected {
+                    break;
+                }
             }
         }
-
-        jobs
+        debug_assert_eq!(proofs.len(), expected);
+        state.received_inputs = 0;
+        let ctx = AggContext {
+            vk: Vec::new(),
+            proofs,
+            is_complete: self.plan.is_top_level(node_id),
+            is_first_shard: false,
+            is_leaf_layer: false,
+            is_deferred: false,
+        };
+        vec![self.enqueue_job(node_id, ctx)]
     }
 
-    fn enqueue_job(
-        &mut self,
-        ctx: AggContext,
-        next_layer: usize,
-        output_index: usize,
-    ) -> AggJobRequest {
+    fn enqueue_job(&mut self, node_id: usize, ctx: AggContext) -> AggJobRequest {
         let job_id = self.next_job_id;
         self.next_job_id += 1;
-        self.pending_jobs.insert(job_id, (next_layer, output_index));
+        self.pending_jobs.insert(job_id, node_id);
+        if let Some(state) = self.nodes.get_mut(node_id) {
+            state.job_inflight = true;
+        }
         tracing::info!(
-            "Aggregator enqueue job {} for layer {} output_index {}",
+            "Aggregator enqueue job {} for node {} layer {} index {}",
             job_id,
-            next_layer,
-            output_index
+            node_id,
+            self.plan.layer_of(node_id),
+            self.plan.index_within_layer(node_id)
         );
         AggJobRequest { id: job_id, ctx }
     }
@@ -284,10 +329,7 @@ impl StreamingAggregator {
     fn is_done(&self) -> bool {
         self.final_result.is_some()
             && self.produced_first_layer == self.first_layer_expected
-            && self
-                .upper_layers
-                .iter()
-                .all(|layer| layer.processed_inputs == layer.expected_inputs)
+            && self.pending_jobs.is_empty()
     }
 
     fn take_final(self) -> anyhow::Result<Vec<u8>> {
