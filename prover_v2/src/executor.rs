@@ -29,12 +29,12 @@ use zkm_stark::{
 
 pub use crate::contexts::SplitContext;
 use crate::{
-    get_prover, NetworkProve, ProverComponents, Segment, StateWithPublicValues,
-    FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE, VK_CACHE,
+    get_prover, NetworkProve, ProverComponents, FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE,
+    VK_CACHE,
 };
 
 pub trait SegmentSink: Send + Sync {
-    fn on_segments(&self, base_index: usize, segments: Vec<Vec<u8>>);
+    fn on_segments(&self, base_index: usize, segments: Vec<ExecutionRecord>);
 
     fn on_segment_count(&self, _total: usize) {}
 
@@ -60,9 +60,14 @@ impl<'a> FileSegmentSink<'a> {
 }
 
 impl<'a> SegmentSink for FileSegmentSink<'a> {
-    fn on_segments(&self, base_index: usize, segments: Vec<Vec<u8>>) {
+    fn on_segments(&self, base_index: usize, segments: Vec<ExecutionRecord>) {
         for (offset, segment) in segments.into_iter().enumerate() {
-            write_file(self.segment_path(base_index + offset), &segment)
+            let encoded_segment = bincode::serialize(&segment).unwrap();
+            // use zstd to compress, level = 2 or 3
+            let compressed_segment =
+                zstd::stream::encode_all(&*encoded_segment, 2).expect("zstd compress failed");
+
+            write_file(self.segment_path(base_index + offset), &compressed_segment)
                 .expect("Failed to write segment");
         }
     }
@@ -83,13 +88,13 @@ impl<'a> SegmentSink for FileSegmentSink<'a> {
 }
 
 pub struct ChannelSegmentSink {
-    sender: std::sync::mpsc::Sender<(usize, Vec<u8>)>,
+    sender: std::sync::mpsc::Sender<(usize, ExecutionRecord)>,
     total_segments: Mutex<usize>,
     deferred: Mutex<Vec<(usize, Vec<u8>)>>,
 }
 
 impl ChannelSegmentSink {
-    pub fn new(sender: std::sync::mpsc::Sender<(usize, Vec<u8>)>) -> Self {
+    pub fn new(sender: std::sync::mpsc::Sender<(usize, ExecutionRecord)>) -> Self {
         Self {
             sender,
             total_segments: Mutex::new(0),
@@ -107,10 +112,10 @@ impl ChannelSegmentSink {
 }
 
 impl SegmentSink for ChannelSegmentSink {
-    fn on_segments(&self, base_index: usize, segments: Vec<Vec<u8>>) {
-        for (offset, segment) in segments.into_iter().enumerate() {
+    fn on_segments(&self, base_index: usize, segments: Vec<ExecutionRecord>) {
+        for (offset, record) in segments.into_iter().enumerate() {
             self.sender
-                .send((base_index + offset, segment))
+                .send((base_index + offset, record))
                 .expect("segment receiver dropped");
         }
     }
@@ -212,7 +217,7 @@ impl Executor {
     pub fn split_streaming(
         &self,
         ctx: &SplitContext,
-        sender: std::sync::mpsc::Sender<(usize, Vec<u8>)>,
+        sender: std::sync::mpsc::Sender<(usize, ExecutionRecord)>,
     ) -> anyhow::Result<(u64, u32, Vec<u8>, Vec<(usize, Vec<u8>)>, Vec<u8>)> {
         // To prevent the executor from occupying a GPU exclusively,
         // the prover used here doesn’t use GPU resources.
@@ -429,7 +434,7 @@ impl Executor {
                                     records.len(),
                                     now.elapsed()
                                 );
-                                debug_assert_eq!(records.len(), 1);
+                                // debug_assert_eq!(records.len(), 1);
                                 *report_aggregate.lock().unwrap() += report;
                                 // reset_seek(&mut checkpoint);
                                 checkpoint
@@ -482,51 +487,22 @@ impl Executor {
                                     state.start_pc = state.next_pc;
                                     record.public_values = *state;
                                 }
+                                records.append(&mut deferred);
 
                                 let mut segment_index = segment_index.lock().unwrap();
                                 let base_index = *segment_index;
-                                *segment_index += records.len() + deferred.len();
+                                *segment_index += records.len();
 
                                 segment_sink.on_segment_count(*segment_index);
 
                                 // Let another worker update the state.
                                 record_gen_sync.advance_turn();
 
-                                let segments: Vec<_> = std::iter::once(Segment::State(Box::new(
-                                    StateWithPublicValues {
-                                        state: exe_state,
-                                        public_values: records[0].public_values,
-                                    },
-                                )))
-                                .chain(deferred.into_iter().map(|r| Segment::Record(Box::new(r))))
-                                .collect();
-
-                                let compressed_segments: Vec<Vec<u8>> = segments
-                                    .par_iter()
-                                    .map(|segment| {
-                                        let now = Instant::now();
-                                        let encoded_segment = bincode::serialize(&segment).unwrap();
-                                        let compressed_segment =
-                                            zstd::stream::encode_all(&*encoded_segment, 2)
-                                                .expect("zstd compress failed");
-                                        tracing::info!("Encoded segment in {:?}", now.elapsed());
-                                        compressed_segment
-                                    })
-                                    .collect();
-                                segment_sink.on_segments(base_index, compressed_segments);
+                                let last_pv = records.last().unwrap().public_values();
+                                segment_sink.on_segments(base_index, records);
 
                                 // process deferred proofs
                                 if done && !stdin.proofs.is_empty() {
-                                    let last_record = if segments.len() == 1 {
-                                        records.last().unwrap()
-                                    } else {
-                                        let last_segment = segments.last().unwrap();
-                                        match last_segment {
-                                            Segment::Record(record) => record,
-                                            _ => unreachable!("last segment should be a record"),
-                                        }
-                                    };
-                                    let last_pv = last_record.public_values();
                                     let last_proof_pv = last_pv.as_slice().borrow();
                                     let deferred_proofs = stdin
                                         .proofs

@@ -76,17 +76,17 @@ impl NetworkProve<'_> {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct StateWithPublicValues {
-    pub state: ExecutionState,
-    pub public_values: PublicValues<u32, u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Segment {
-    State(Box<StateWithPublicValues>),
-    Record(Box<ExecutionRecord>),
-}
+// #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+// pub struct StateWithPublicValues {
+//     pub state: ExecutionState,
+//     pub public_values: PublicValues<u32, u32>,
+// }
+//
+// #[derive(Debug, Clone, Serialize, Deserialize)]
+// pub enum Segment {
+//     State(Box<StateWithPublicValues>),
+//     Record(Box<ExecutionRecord>),
+// }
 
 #[cfg(feature = "gpu")]
 type ProverComponents = zkm_gpu_prover::components::GpuProverComponents;

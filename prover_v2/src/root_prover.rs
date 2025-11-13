@@ -1,6 +1,7 @@
 use crate::contexts::ProveContext;
-use crate::{get_prover, NetworkProve, ProverComponents, Segment, KEY_CACHE, PROGRAM_CACHE};
+use crate::{get_prover, NetworkProve, ProverComponents, KEY_CACHE, PROGRAM_CACHE};
 use common::file;
+use zkm_core_executor::ExecutionRecord;
 use zkm_core_machine::utils::trace_checkpoint;
 use zkm_prover::CoreSC;
 use zkm_stark::{MachineProver, StarkGenericConfig};
@@ -28,17 +29,19 @@ impl RootProver {
     pub fn prove_from_segment(
         &self,
         ctx: &ProveContext,
-        segment: Segment,
+        segment: ExecutionRecord,
     ) -> anyhow::Result<Vec<u8>> {
         let prover = get_prover();
         self.prove_with_prover(0, &prover, ctx, segment)
     }
 
-    fn prepare_segment(ctx: &ProveContext) -> anyhow::Result<Segment> {
-        if !ctx.segment_bytes.is_empty() {
-            Self::decode_segment(&ctx.segment_bytes)
+    fn prepare_segment(ctx: &ProveContext) -> anyhow::Result<ExecutionRecord> {
+        if let Some(segment) = ctx.segment_obj.clone() {
+            Ok(segment)
+        } else if !ctx.segment_bytes.is_empty() {
+            Self::decode_record(&ctx.segment_bytes)
         } else {
-            Self::read_segment_from_file(&ctx.segment)
+            Self::read_record_from_file(&ctx.segment)
         }
     }
 
@@ -47,49 +50,11 @@ impl RootProver {
         idx: usize,
         prover: &ZKMProver<ProverComponents>,
         ctx: &ProveContext,
-        segment: Segment,
+        mut record: ExecutionRecord,
     ) -> anyhow::Result<Vec<u8>> {
         tracing::info!("GPU {idx} to prove");
         let network_prove = NetworkProve::new(ctx.seg_size);
         let opts = network_prove.opts.core_opts;
-
-        let mut record = match segment {
-            Segment::State(state) => {
-                let program = {
-                    let mut program_cache = PROGRAM_CACHE.lock();
-                    if let Some(program) = program_cache.cache.get(&ctx.program_id) {
-                        tracing::info!("GPU {idx} load program from cache");
-                        program.clone()
-                    } else {
-                        tracing::info!("GPU {idx} No program in cache, generate new program");
-                        let elf = if !ctx.elf.is_empty() {
-                            ctx.elf.clone()
-                        } else {
-                            file::new(&ctx.elf_path).read()?
-                        };
-                        let program = prover
-                            .get_program(&elf)
-                            .map_err(|e| anyhow::Error::msg(e.to_string()))?;
-                        program_cache.push(ctx.program_id.clone(), program.clone());
-                        program
-                    }
-                };
-                let public_values = state.public_values;
-                let (records, _) = tracing::debug_span!("trace checkpoint").in_scope(|| {
-                    trace_checkpoint::<CoreSC>(
-                        program.clone(),
-                        state.state,
-                        opts,
-                        prover.core_shape_config.as_ref(),
-                    )
-                });
-                let mut record = records.into_iter().next().unwrap();
-                let _ = record.defer();
-                record.public_values = public_values;
-                record
-            }
-            Segment::Record(record) => *record,
-        };
 
         tracing::info!("GPU {idx} record loaded");
         let now = std::time::Instant::now();
@@ -147,20 +112,18 @@ impl RootProver {
         let proof = handle
             .with_prover(|prover| self.prove_with_prover(idx, prover, ctx, segment))
             .map_err(|err| anyhow::anyhow!("failed to execute root proof on GPU: {err}"))??;
-        // cuda_runtime::sync_device().map_err(|err| {
-        //     anyhow::anyhow!("failed to synchronize GPU {idx} after root prove: {err}")
-        // })?;
+
         Ok(proof)
     }
 
-    fn decode_segment(bytes: &[u8]) -> anyhow::Result<Segment> {
+    fn decode_record(bytes: &[u8]) -> anyhow::Result<ExecutionRecord> {
         let decoded = zstd::stream::decode_all(bytes)
             .map_err(|e| anyhow::anyhow!("zstd decode failed: {e}"))?;
-        Ok(bincode::deserialize::<Segment>(&decoded)
+        Ok(bincode::deserialize::<ExecutionRecord>(&decoded)
             .map_err(|e| anyhow::anyhow!("segment deserialize failed: {e}"))?)
     }
 
-    fn read_segment_from_file(path: &str) -> anyhow::Result<Segment> {
+    fn read_record_from_file(path: &str) -> anyhow::Result<ExecutionRecord> {
         let now = std::time::Instant::now();
         let mut retries = 0;
         const MAX_RETRIES: usize = 10;
@@ -172,7 +135,7 @@ impl RootProver {
                         .map_err(|e| std::io::Error::other(format!("zstd decode failed: {e}")))
                 })
                 .and_then(|decoded| {
-                    bincode::deserialize::<Segment>(&decoded).map_err(|e| {
+                    bincode::deserialize::<ExecutionRecord>(&decoded).map_err(|e| {
                         std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
                             format!("deserialize failed: {e}"),
