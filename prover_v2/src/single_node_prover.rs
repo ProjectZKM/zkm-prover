@@ -152,6 +152,12 @@ impl StreamingAggregator {
         let Some((next_layer, index)) = self.pending_jobs.remove(&job_id) else {
             return Err(anyhow!("received completion for unknown aggregation job"));
         };
+        tracing::info!(
+            "Aggregator job {} completed, advancing to layer {} index {}",
+            job_id,
+            next_layer,
+            index
+        );
         Ok(self.process_upper_layers(proof, next_layer, index))
     }
 
@@ -168,6 +174,11 @@ impl StreamingAggregator {
 
         for idx in start_layer..=last_layer_index {
             if idx == last_layer_index {
+                tracing::info!(
+                    "Aggregator produced final result at layer {} index {}",
+                    idx,
+                    current_index
+                );
                 self.final_result = Some(current_proof);
                 break;
             }
@@ -176,6 +187,13 @@ impl StreamingAggregator {
             let layer = &mut self.upper_layers[idx];
             layer.processed_inputs += 1;
             layer.buffer.insert(current_index, current_proof);
+            tracing::info!(
+                "Aggregator layer {} progress {}/{} (chunk_count={})",
+                idx,
+                layer.processed_inputs,
+                layer.expected_inputs,
+                layer.chunk_count
+            );
             let is_final_chunk = layer.chunk_count == 1 && idx == layer_last;
             let chunk_idx = current_index / 2;
             let left_idx = chunk_idx * 2;
@@ -185,6 +203,13 @@ impl StreamingAggregator {
                 if layer.buffer.contains_key(&left_idx) && layer.buffer.contains_key(&right_idx) {
                     let left = layer.buffer.remove(&left_idx).unwrap();
                     let right = layer.buffer.remove(&right_idx).unwrap();
+                    tracing::info!(
+                        "Aggregator layer {} ready chunk {} (left {}, right {})",
+                        idx,
+                        chunk_idx,
+                        left_idx,
+                        right_idx
+                    );
                     Some((
                         chunk_idx,
                         AggContext {
@@ -199,6 +224,11 @@ impl StreamingAggregator {
                 } else if layer.processed_inputs == layer.expected_inputs {
                     if let Some((&remaining_index, _)) = layer.buffer.iter().next() {
                         let remaining = layer.buffer.remove(&remaining_index).unwrap();
+                        tracing::info!(
+                            "Aggregator layer {} last remaining chunk {}",
+                            idx,
+                            remaining_index
+                        );
                         Some((
                             remaining_index / 2,
                             AggContext {
@@ -221,6 +251,11 @@ impl StreamingAggregator {
                 jobs.push(self.enqueue_job(ctx, idx + 1, next_index));
                 break;
             } else {
+                tracing::debug!(
+                    "Aggregator layer {} waiting for more inputs (buffer size {})",
+                    idx,
+                    layer.buffer.len()
+                );
                 break;
             }
         }
@@ -237,6 +272,12 @@ impl StreamingAggregator {
         let job_id = self.next_job_id;
         self.next_job_id += 1;
         self.pending_jobs.insert(job_id, (next_layer, output_index));
+        tracing::info!(
+            "Aggregator enqueue job {} for layer {} output_index {}",
+            job_id,
+            next_layer,
+            output_index
+        );
         AggJobRequest { id: job_id, ctx }
     }
 
@@ -272,10 +313,20 @@ where
     I: IntoIterator<Item = AggJobRequest>,
 {
     for job in jobs.into_iter() {
+        tracing::info!(
+            "Dispatching aggregation job {} current_pending={}",
+            job.id,
+            pending_gpu_jobs
+        );
         dispatcher
             .submit_agg(job.id, job.ctx, result_tx.clone())
             .map_err(|e| anyhow!("failed to dispatch aggregation job: {e}"))?;
         *pending_gpu_jobs += 1;
+        tracing::info!(
+            "Aggregation job {} submitted, pending_gpu_jobs={}",
+            job.id,
+            pending_gpu_jobs
+        );
     }
     Ok(())
 }
@@ -296,6 +347,12 @@ fn run_aggregator(
         .context("aggregator config channel closed before receiving config")?;
 
     let chunk_size = cmp::max(FIRST_LAYER_BATCH_SIZE, 1);
+    tracing::info!(
+        "Aggregator initialized: total_segments={} chunk_size={} deferred_inputs={}",
+        config.total_segments,
+        chunk_size,
+        config.deferred_inputs.len()
+    );
     let mut chunk_ranges = Vec::new();
     let mut start = 0usize;
     while start < config.total_segments {
@@ -324,14 +381,32 @@ fn run_aggregator(
     let mut deferred_next_index = chunk_ranges.len();
 
     loop {
-        if !allow_agg && remaining_roots.load(Ordering::Relaxed) <= gpu_capacity {
-            allow_agg = true;
-            dispatch_agg_jobs(
-                &dispatcher,
-                &agg_job_tx,
-                queued_jobs.drain(..),
-                &mut pending_gpu_jobs,
-            )?;
+        tracing::debug!(
+            "Aggregator loop state: remaining_roots={} pending_gpu_jobs={} queued_jobs={} next_chunk={} allow_agg={} is_done={}",
+            remaining_roots.load(Ordering::Relaxed),
+            pending_gpu_jobs,
+            queued_jobs.len(),
+            next_chunk_index,
+            allow_agg,
+            aggregator.is_done()
+        );
+        if !allow_agg {
+            let current_roots = remaining_roots.load(Ordering::Relaxed);
+            if current_roots <= gpu_capacity {
+                allow_agg = true;
+                tracing::info!(
+                    "Enabling aggregation dispatch: remaining_roots={}, gpu_capacity={}, queued_jobs={}",
+                    current_roots,
+                    gpu_capacity,
+                    queued_jobs.len()
+                );
+                dispatch_agg_jobs(
+                    &dispatcher,
+                    &agg_job_tx,
+                    queued_jobs.drain(..),
+                    &mut pending_gpu_jobs,
+                )?;
+            }
         }
 
         while let Ok((job_id, result)) = agg_job_rx.try_recv() {
@@ -340,6 +415,12 @@ fn run_aggregator(
                 Ok(proof) => aggregator.handle_job_completion(job_id, proof)?,
                 Err(err) => return Err(err),
             };
+            tracing::info!(
+                "Aggregation job {} finished, pending_gpu_jobs={} allow_agg={}",
+                job_id,
+                pending_gpu_jobs,
+                allow_agg
+            );
             if allow_agg {
                 dispatch_agg_jobs(&dispatcher, &agg_job_tx, followups, &mut pending_gpu_jobs)?;
             } else {
@@ -361,6 +442,10 @@ fn run_aggregator(
         }
 
         if aggregator.is_done() && pending_gpu_jobs == 0 {
+            tracing::info!(
+                "Aggregator completed: pending_gpu_jobs=0, queued_jobs={}",
+                queued_jobs.len()
+            );
             let result = aggregator.take_final()?;
             if let Some(tx) = snark_tx {
                 tx.send(result.clone())
@@ -377,6 +462,13 @@ fn run_aggregator(
                 for idx in start_idx..end_idx {
                     chunk_proofs.push(proofs.remove(&idx).unwrap());
                 }
+                tracing::info!(
+                    "Scheduling aggregation chunk {} (segments {}-{}) allow_agg={}",
+                    next_chunk_index,
+                    start_idx,
+                    end_idx,
+                    allow_agg
+                );
                 let jobs = aggregator.push_normal_chunk(
                     chunk_proofs,
                     next_chunk_index == 0,
@@ -407,6 +499,10 @@ fn run_aggregator(
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     root_channel_open = false;
+                    tracing::info!(
+                        "Root channel closed after processing all segments; proofs_len={}",
+                        proofs.len()
+                    );
                 }
             }
         } else if pending_gpu_jobs > 0 {
@@ -417,6 +513,12 @@ fn run_aggregator(
                         Ok(proof) => aggregator.handle_job_completion(job_id, proof)?,
                         Err(err) => return Err(err),
                     };
+                    tracing::info!(
+                        "Blocking receive completed job {} pending_gpu_jobs={} allow_agg={}",
+                        job_id,
+                        pending_gpu_jobs,
+                        allow_agg
+                    );
                     dispatch_agg_jobs(&dispatcher, &agg_job_tx, followups, &mut pending_gpu_jobs)?;
                 }
                 Err(_) => {

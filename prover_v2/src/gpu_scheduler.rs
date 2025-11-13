@@ -178,7 +178,7 @@ fn worker_loop(
                 result_tx,
             } => {
                 tracing::info!("GPU {idx} processing agg job");
-                let res = agg_prover.prove_with_gpu_handle(&handle, &ctx);
+                let res = agg_prover.prove_with_gpu_handle(idx, &handle, &ctx);
                 let _ = result_tx.send((job_id, res));
             }
             JobMessage::Shutdown => return,
