@@ -28,10 +28,7 @@ use zkm_stark::{
 };
 
 pub use crate::contexts::SplitContext;
-use crate::{
-    get_prover, NetworkProve, ProverComponents, FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE,
-    VK_CACHE,
-};
+use crate::{get_prover, NetworkProve, FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE, VK_CACHE};
 
 pub trait SegmentSink: Send + Sync {
     fn on_segments(&self, base_index: usize, segments: Vec<ExecutionRecord>);

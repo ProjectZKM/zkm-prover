@@ -3,3 +3,8 @@
 /output
 .vscode
 .idea
+/**/.env 
+tools/certs/*
+proof-service/config/prover1.toml
+examples/fibonacci/guest/target
+examples/fibonacci/host/proof-with-pis.bin

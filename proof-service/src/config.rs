@@ -17,7 +17,6 @@ pub struct RuntimeConfig {
     pub max_concurrent_tasks: Option<usize>,
 
     pub fileserver_url: Option<String>,
-    // pub fileserver_addr: String,
     pub proving_key_paths: Vec<String>,
 
     pub ca_cert_path: Option<String>,
@@ -35,7 +34,6 @@ impl RuntimeConfig {
             base_dir: "/tmp".to_string(),
             max_concurrent_tasks: Some(1),
             fileserver_url: None,
-            // fileserver_addr: "0.0.0.0:40000".to_string(),
             proving_key_paths: vec![],
             ca_cert_path: None,
             cert_path: None,

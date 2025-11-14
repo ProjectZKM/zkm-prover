@@ -1,4 +1,7 @@
 addr = "{{addr}}"
+metrics_addr = "0.0.0.0:50011"
+database_url = "mysql://stage:123456@localhost:3306/zkm2"
 prover_addrs = [{{prover_addrs}}]
 base_dir = "{{base_dir}}"
 proving_key_paths = ["/mnt/data/zkm/proving.key", "/mnt/data/zkm2/proving.key"]
+fileserver_url = "http://0.0.0.0:40000/test/test_proof/proof"

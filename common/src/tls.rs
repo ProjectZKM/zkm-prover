@@ -29,6 +29,7 @@ async fn get_cert_and_identity(
     let mut ca: Option<Certificate> = None;
     let mut identity: Option<Identity> = None;
     if ca_cert_path.is_file() {
+        println!("Loading CA cert from {:?}", ca_cert_path);
         let ca_cert = tokio::fs::read(ca_cert_path)
             .await
             .unwrap_or_else(|err| panic!("Failed to read {:?}, err: {:?}", ca_cert_path, err));
@@ -36,6 +37,10 @@ async fn get_cert_and_identity(
     }
 
     if cert_path.is_file() && key_path.is_file() {
+        println!(
+            "Loading server identity cert and key from {:?} and {:?}",
+            cert_path, key_path
+        );
         let cert = tokio::fs::read(cert_path)
             .await
             .unwrap_or_else(|err| panic!("Failed to read {:?}, err: {:?}", cert_path, err));

@@ -1,11 +1,10 @@
 use lru::LruCache;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use zkm_core_executor::{ExecutionRecord, ExecutionState, Program, ZKMContextBuilder};
+use zkm_core_executor::{Program, ZKMContextBuilder};
 use zkm_core_machine::io::ZKMStdin;
 #[cfg(feature = "gpu")]
 use zkm_gpu_core::{
@@ -16,7 +15,7 @@ use zkm_gpu_core::{
 use zkm_prover::{CoreSC, OuterSC, ZKMProver};
 #[cfg(not(feature = "gpu"))]
 use zkm_stark::StarkProvingKey;
-use zkm_stark::{PublicValues, StarkVerifyingKey, ZKMProverOpts};
+use zkm_stark::{StarkVerifyingKey, ZKMProverOpts};
 
 pub use zkm_sdk;
 

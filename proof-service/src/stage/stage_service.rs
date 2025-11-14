@@ -13,9 +13,6 @@ use tonic::{Request, Response, Status};
 use crate::config;
 use common::file;
 
-#[cfg(feature = "prover")]
-use prover::provers;
-
 use ethers::types::Signature;
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -139,22 +136,6 @@ impl StageService for StageServiceSVC {
                             };
                     }
                     if let Some(fileserver_url) = &self.config.fileserver_url {
-                        #[cfg(feature = "prover")]
-                        if target_step == Step::Snark {
-                            response.snark_proof_url = format!(
-                                "{}/{}/snark/proof_with_public_inputs.json",
-                                fileserver_url,
-                                request.get_ref().proof_id
-                            );
-                            response.stark_proof_url = format!(
-                                "{}/{}/wrap/proof_with_public_inputs.json",
-                                fileserver_url,
-                                request.get_ref().proof_id
-                            );
-                        }
-                        #[cfg(feature = "prover")]
-                        let suffix = "json";
-                        #[cfg(feature = "prover_v2")]
                         let suffix = "bin";
                         response.public_values_url = format!(
                             "{}/{}/wrap/public_values.{}",
@@ -181,29 +162,6 @@ impl StageService for StageServiceSVC {
             tracing::info!("[generate_proof] {} start", request.get_ref().proof_id);
 
             // check seg_size
-            #[cfg(feature = "prover")]
-            if !request.get_ref().composite_proof
-                && !provers::valid_seg_size(request.get_ref().seg_size as usize)
-            {
-                let response = GenerateProofResponse {
-                    proof_id: request.get_ref().proof_id.clone(),
-                    status: InvalidParameter.into(),
-                    error_message: format!(
-                        "invalid seg_size support [{}-{}]",
-                        provers::MIN_SEG_SIZE,
-                        provers::MAX_SEG_SIZE
-                    ),
-                    ..Default::default()
-                };
-                tracing::warn!(
-                    "[generate_proof] {} invalid seg_size support [{}-{}] {}",
-                    request.get_ref().proof_id,
-                    request.get_ref().seg_size,
-                    provers::MIN_SEG_SIZE,
-                    provers::MAX_SEG_SIZE
-                );
-                return Ok(Response::new(response));
-            }
             // check signature
             let user_address: String;
             match self.verify_signature(request.get_ref()) {
@@ -345,11 +303,20 @@ impl StageService for StageServiceSVC {
                             tracing::info!(
                                 "[generate_proof] {} elf_id not found, write to cache: {}",
                                 request.get_ref().proof_id,
-                                elf_id
+                                elf_path
                             );
+
                             file::new(&elf_path)
                                 .write(&request.get_ref().elf_data)
-                                .map_err(|e| Status::internal(e.to_string()))?;
+                                .map_err(|e| {
+                                    tracing::error!(
+                                        "[generate_proof] {} write elf_data to {} failed: {:?}",
+                                        request.get_ref().proof_id,
+                                        elf_path,
+                                        e
+                                    );
+                                    Status::internal(e.to_string())
+                                })?;
                         } else {
                             tracing::info!(
                                 "[generate_proof] {} elf_id found cache but provided: {}",
@@ -467,11 +434,7 @@ impl StageService for StageServiceSVC {
                 .create_dir_all()
                 .map_err(|e| Status::internal(e.to_string()))?;
 
-            let output_stream_path = if cfg!(feature = "prover") {
-                format!("{}/{}", output_stream_dir, "output_stream")
-            } else {
-                String::new()
-            };
+            let output_stream_path = String::new();
 
             let seg_path = format!("{}/segment", dir_path);
             file::new(&seg_path)
@@ -494,9 +457,6 @@ impl StageService for StageServiceSVC {
             // if from_step == Agg, we need write dummy data to public values in case of panic
             if from_step == Step::Agg {
                 let public_values_path = {
-                    #[cfg(feature = "prover")]
-                    let suffix = "json";
-                    #[cfg(feature = "prover_v2")]
                     let suffix = "bin";
                     format!("{}/public_values.{}", wrap_dir, suffix)
                 };
@@ -512,13 +472,7 @@ impl StageService for StageServiceSVC {
                 .map_err(|e| Status::internal(e.to_string()))?;
             let snark_path = format!("{}/proof_with_public_inputs.json", snark_dir);
 
-            let prover_version = if cfg!(feature = "prover") {
-                ProverVersion::Zkm
-            } else if cfg!(feature = "prover_v2") {
-                ProverVersion::Zkm2
-            } else {
-                return Err(Status::internal("ProverVersion error"));
-            };
+            let prover_version = ProverVersion::Zkm2;
 
             let generate_task = GenerateTask::new(
                 prover_version,
@@ -575,26 +529,8 @@ impl StageService for StageServiceSVC {
             // TODO: we use the stage server as the file server, any better way?
             let mut snark_proof_url = String::new();
             let mut stark_proof_url = String::new();
-            #[cfg(feature = "prover")]
-            if let Some(fileserver_url) = &self.config.fileserver_url {
-                if target_step == Step::Snark {
-                    snark_proof_url = format!(
-                        "{}/{}/snark/proof_with_public_inputs.json",
-                        fileserver_url,
-                        request.get_ref().proof_id
-                    );
-                    stark_proof_url = format!(
-                        "{}/{}/wrap/proof_with_public_inputs.json",
-                        fileserver_url,
-                        request.get_ref().proof_id
-                    );
-                }
-            };
             let mut public_values_url = match &self.config.fileserver_url {
                 Some(fileserver_url) => {
-                    #[cfg(feature = "prover")]
-                    let suffix = "json";
-                    #[cfg(feature = "prover_v2")]
                     let suffix = "bin";
                     format!(
                         "{}/{}/wrap/public_values.{}",

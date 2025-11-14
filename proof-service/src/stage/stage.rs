@@ -1,5 +1,4 @@
 use crate::proto::includes::v1::Step;
-#[cfg(feature = "prover_v2")]
 use crate::stage::safe_read;
 use crate::stage::tasks::{
     agg_task::AggTask, generate_task::GenerateTask, ProveTask, SingleNodeTask, SnarkTask,
@@ -310,7 +309,6 @@ impl Stage {
             }
         }
 
-        #[cfg(feature = "prover_v2")]
         {
             let files = common::file::new(&self.generate_task.seg_path)
                 .read_dir()
@@ -340,15 +338,6 @@ impl Stage {
                 };
                 self.prove_tasks.push(prove_task);
             }
-        }
-
-        #[cfg(feature = "prover")]
-        if self.prove_tasks.len() < 2 {
-            self.is_error = true;
-            self.errmsg = format!(
-                "Segment count is {}, please reduce SEG_SIZE !",
-                self.prove_tasks.len()
-            );
         }
     }
 
@@ -402,49 +391,6 @@ impl Stage {
             .count()
     }
 
-    #[cfg(feature = "prover")]
-    pub fn gen_agg_tasks(&mut self) {
-        // FIXME: we don't have to wait all the prove tasks done for the single GenerateTask. We should keep track of the agg_index in the Stage structure.
-        let mut agg_index = 0;
-        let mut result = Vec::new();
-        let mut current_length = self.prove_tasks.len();
-        for i in (0..current_length - 1).step_by(2) {
-            agg_index += 1;
-            result.push(AggTask::init_from_two_prove_task(
-                &(self.prove_tasks[i]),
-                &(self.prove_tasks[i + 1]),
-                agg_index,
-            ));
-        }
-        if current_length % 2 == 1 {
-            result.push(AggTask::init_from_single_prove_task(
-                &(self.prove_tasks[current_length - 1]),
-                agg_index + 1,
-            ));
-        }
-        self.agg_tasks.append(&mut result.clone());
-
-        current_length = result.len();
-        while current_length > 1 {
-            let mut new_result = Vec::new();
-            for i in (0..current_length - 1).step_by(2) {
-                agg_index += 1;
-                let agg_task =
-                    AggTask::init_from_two_agg_task(&result[i], &result[i + 1], agg_index);
-                self.agg_tasks.push(agg_task.clone());
-                new_result.push(agg_task);
-            }
-            if current_length % 2 == 1 {
-                new_result.push(result[current_length - 1].clone());
-            }
-            result = new_result;
-            current_length = result.len();
-        }
-        let last_agg_tasks = self.agg_tasks.len() - 1;
-        self.agg_tasks[last_agg_tasks].is_final = true;
-    }
-
-    #[cfg(feature = "prover_v2")]
     pub fn gen_agg_tasks(&mut self) {
         use prover_v2::FIRST_LAYER_BATCH_SIZE;
         // The batch size for reducing two layers of recursion.
@@ -746,35 +692,35 @@ impl Debug for Stage {
     }
 }
 
-#[cfg(test)]
-#[cfg(feature = "prover")]
-mod tests {
-    use super::*;
-    #[test]
-    fn test_gen_agg_tasks() {
-        for n in 12..20 {
-            let mut stage = Stage::default();
-            for i in 0..n {
-                stage.prove_tasks.insert(
-                    i,
-                    ProveTask {
-                        output: vec![1, 2, 3],
-                        file_no: i,
-                        ..Default::default()
-                    },
-                );
-            }
-            stage.gen_agg_tasks();
-            stage.agg_tasks.iter().for_each(|element| {
-                let left = element.inputs.first().is_some_and(|input| input.is_agg);
-                let right = element.inputs.get(1).is_some_and(|input| input.is_agg);
-
-                println!(
-                    "agg: left:{} right:{} final:{}",
-                    left, right, element.is_final,
-                );
-            });
-            assert!(stage.agg_tasks.len() <= n);
-        }
-    }
-}
+//#[cfg(test)]
+//#[cfg(feature = "prover")]
+//mod tests {
+//    use super::*;
+//    #[test]
+//    fn test_gen_agg_tasks() {
+//        for n in 12..20 {
+//            let mut stage = Stage::default();
+//            for i in 0..n {
+//                stage.prove_tasks.insert(
+//                    i,
+//                    ProveTask {
+//                        output: vec![1, 2, 3],
+//                        file_no: i,
+//                        ..Default::default()
+//                    },
+//                );
+//            }
+//            stage.gen_agg_tasks();
+//            stage.agg_tasks.iter().for_each(|element| {
+//                let left = element.inputs.first().is_some_and(|input| input.is_agg);
+//                let right = element.inputs.get(1).is_some_and(|input| input.is_agg);
+//
+//                println!(
+//                    "agg: left:{} right:{} final:{}",
+//                    left, right, element.is_final,
+//                );
+//            });
+//            assert!(stage.agg_tasks.len() <= n);
+//        }
+//    }
+//}
