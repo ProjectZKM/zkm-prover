@@ -1,25 +1,74 @@
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+repository = "https://github.com/ProjectZKM/zkm-prover"
+keywords = ["zkMIPS", "zero-knowledge", "zkvm", "MIPS"]
+categories = ["cryptography"]
+
 [workspace]
 members = [
-    "prover",
     "common",
     "proof-service",
+    "examples/fibonacci/host",
     "prover_v2",
 ]
 
-resolver = "2"
+[workspace.dependencies]
+prover_v2 = { path = "./prover_v2" }
+common = { path = "./common" }
 
-[patch."https://github.com/zkMIPS/plonky2.git"]
-plonky2 = { git = "https://github.com/ProjectZKM/plonky2.git", branch = "zkm_dev" }
-plonky2_field = { git = "https://github.com/ProjectZKM/plonky2.git", branch = "zkm_dev" }
-plonky2_util = { git = "https://github.com/ProjectZKM/plonky2.git", branch = "zkm_dev" }
-plonky2_maybe_rayon = { git = "https://github.com/ProjectZKM/plonky2.git", branch = "zkm_dev" }
+tonic = { version = "0.8.3", features = ["gzip"] }
+prost = "0.11.0"
+tokio = { version = "1.21.0", features = ["macros", "rt-multi-thread", "signal"] }
 
-[patch."https://github.com/zkMIPS/succinctx.git"]
-plonky2x = { git = "https://github.com/ProjectZKM/succinctx.git", branch = "zkm" }
-plonky2x-derive = { git = "https://github.com/ProjectZKM/succinctx.git", branch = "zkm" }
+uuid = { version = "1.2", features = ["v4", "fast-rng", "macro-diagnostics"] }
+sqlx = { version = "0.8.1", features = ["mysql", "time", "runtime-tokio"] }
+serde_derive = "1.0.92"
+log = "0.4.0"
+env_logger = "0.10"
+toml = "0.5.1"
+clap = "4.5.2"
+hex = "0.4.3"
+ethers = "2.0.14"
+prometheus = "0.13"
+hyper = { version = "^0.14", features = ["server", "http1", "tcp"] }
+rand = "0.8"
+sha2 = "0.10.9"
 
-[patch."https://github.com/zkMIPS/curta.git"]
-curta = { git = "https://github.com/ProjectZKM/curta.git", branch = "zkm" }
+tracing = "0.1.37"
+tracing-forest = { version = "0.1.6", features = ["ansi", "smallvec"] }
+tracing-subscriber = { version = "0.3.19", features = ["std", "env-filter"] }
+rayon = "1.10.0"
+
+serde_json = "1.0.140"
+serde = { version = "1.0.219", features = ["derive", "rc"] }
+bincode = "1.3.3"
+anyhow = "1.0.97"
+once_cell = "1.13.0"
+zstd = "0.13.3"
+lru = "0.14.0"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+
+zkm-core-machine = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-core-executor = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-stark = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-prover = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-recursion-compiler = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-recursion-core = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-recursion-circuit = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-sdk = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-build = { git = "https://github.com/ProjectZKM/Ziren" }
+
+p3-maybe-rayon = { git = "https://github.com/ProjectZKM/Plonky3" }
+
+zkm-gpu-prover = { git = "https://github.com/ProjectZKM/ziren-gpu" }
+zkm-gpu-core = { git = "https://github.com/ProjectZKM/ziren-gpu" }
+
+tempfile = "3.18.0"
+lazy_static = "1.5.0"
 
 #[path."https://github.com/ProjectZKM/Ziren"]
 #zkm-core-machine = { path = "../Ziren/crates/core/machine" }

@@ -90,22 +90,27 @@ docker run --name db-proof-service -e MYSQL_ROOT_PASSWORD=123456 -v ./initdb.d:/
 
 ```
 
-### Prover
+For Ziren:
 
-Create the prover nodes `config.toml` below.
-
-```toml
-# Replace it with your IP address and port
-addr = "0.0.0.0:50000"
-prover_addrs = []
-# The NFS file system path / S3 must be used, and all node configurations must be the same
-base_dir = "/tmp/zkm/test_proof"
-proving_key_paths = ["/tmp/zkm/proving.key"]
+1. Launch the Mysql service.
+```
+docker run --name zkm-mysql -e MYSQL_ROOT_PASSWORD=123456 -e MYSQL_DATABASE=zkm2 -e MYSQL_USER=stage -e MYSQL_PASSWORD=123456 -p 3306:3306 -v /var/mysql-data:/var/lib/mysql  -d mysql:latest
 ```
 
-Refer to sample [sha2](https://github.com/ProjectZKM/zkm/blob/main/recursion/src/lib.rs#L165) to generate the proving
-key
-and verifying key.
+You can use `docker exec -it zkm-mysql  mysql -u stage -p` to login the database and check out the schemes.
+
+2. Migrate the tables
+
+set your `DATABASE_URL`, like `DATABASE_URL=mysql://stage:${password}@localhost/zkm2`.
+
+```
+cargo install sqlx-cli
+sqlx migrate run
+```
+
+### Prover
+
+Create the prover nodes `config.toml` by [gen_config.sh](./proof-service/config/gen_config.sh).
 
 Start
 
@@ -115,21 +120,7 @@ export RUST_LOG=info; nohup ./target/release/proof-service --config ./proof-serv
 
 ### Stage
 
-Create the stage server `config.toml` below, and set up the `prover_addrs`.
-
-```toml
-# Replace it with your IP address and port
-addr = "0.0.0.0:50000"
-# All prover node 
-prover_addrs = ["127.0.0.1:50001"]
-database_url = "mysql://root:123456@localhost:3306/zkm"
-# The NFS file system path / S3 must be used, and all node configurations must be the same
-base_dir = "/tmp/zkm/test_proof"
-
-# File Server
-fileserver_url = "http://0.0.0.0:40000/public"
-fileserver_addr = "0.0.0.0:40000"
-```
+Create the stage server `config.toml` by [gen_config.sh](./proof-service/config/gen_config.sh), and set up the `prover_addrs`.
 
 Start
 
@@ -137,8 +128,40 @@ Start
 export RUST_LOG=info; nohup ./target/release/proof-service --stage --config ./proof-service/config/stage.toml > stage.out &
 ```
 
-## Features
+### File Server
 
-[x] - Stage Checkpoint
-[  ] - Task Checkpoint
-[  ] - Task Scheduler
+Use [Static Web Server](https://static-web-server.net/getting-started/) as the file server.
+
+```
+cargo install static-web-server
+static-web-server --port 40000 --root /tmp/zkm/
+```
+
+### Run Reth
+
+1. Add your address to whilitest
+
+```
+INSERT INTO user (address) VALUES ('$your address without 0x prefix');
+```
+
+2. Generate your certificate as per to [config](./proof-service/config/README.md)
+
+
+3. Prove your program 
+
+A simple example would be like Fibonacci.
+
+```
+cd examples/host
+# configure your network prover
+cargo run -r
+```
+
+For Reth:
+```
+git clone https://github.com/ProjectZKM/reth-processor -b stateless
+
+cargo run -r -- --block-number 23794449  --rpc-url ${your rpc} --debug-rpc-url ${your debug rpc} --chain-id 1 --prove
+
+```

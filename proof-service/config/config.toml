@@ -1,9 +1,8 @@
 addr = "0.0.0.0:50001"
 metrics_addr = "0.0.0.0:50011"
-database_url = "mysql://stage:123456@localhost:13306/zkm"
+database_url = "mysql://stage:123456@localhost:13306/zkm2"
 # Must be: $zkm url, $zkm2 url
-proving_key_paths = ["/tmp/input/"]
+proving_key_paths = []
 prover_addrs = []
 base_dir = "/tmp/zkm/test/test_proof"
-fileserver_url = "/tmp/zkm/fileserver"
-fileserver_addr = "0.0.0.0:40001"
+fileserver_url = "http://0.0.0.0:40000/test/test_proof/proof"

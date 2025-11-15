@@ -1,9 +1,6 @@
 use crate::contexts::ProveContext;
-use crate::{get_prover, NetworkProve, ProverComponents, KEY_CACHE, PROGRAM_CACHE};
-use common::file;
+use crate::{get_prover, NetworkProve, ProverComponents, KEY_CACHE};
 use zkm_core_executor::ExecutionRecord;
-use zkm_core_machine::utils::trace_checkpoint;
-use zkm_prover::CoreSC;
 use zkm_stark::{MachineProver, StarkGenericConfig};
 
 #[cfg(feature = "gpu")]
@@ -71,9 +68,7 @@ impl RootProver {
         });
         tracing::info!("GPU {idx} setup time: {:?}", now.elapsed());
         let now = std::time::Instant::now();
-        tracing::info!(
-            "GPU {idx} segment {segment_index}: generating dependencies"
-        );
+        tracing::info!("GPU {idx} segment {segment_index}: generating dependencies");
         prover.core_prover.machine().generate_dependencies(
             std::slice::from_mut(&mut record),
             &opts,
