@@ -591,7 +591,7 @@ impl SingleNodeProver {
             proving_key_paths: proving_key_paths.into(),
         }
     }
-    pub fn prove(&self, ctx: &SingleNodeContext) -> anyhow::Result<(u64, Vec<u8>)> {
+    pub fn prove(&self, ctx: &SingleNodeContext) -> anyhow::Result<(u64, Vec<u8>, Vec<u8>)> {
         if ctx.local_prover_threads > 1 {
             #[cfg(feature = "gpu")]
             {
@@ -605,7 +605,7 @@ impl SingleNodeProver {
     }
 
     #[cfg(feature = "gpu")]
-    fn prove_in_process(&self, ctx: &SingleNodeContext) -> anyhow::Result<(u64, Vec<u8>)> {
+    fn prove_in_process(&self, ctx: &SingleNodeContext) -> anyhow::Result<(u64, Vec<u8>, Vec<u8>)> {
         let target_step = Step::from_i32(ctx.target_step)
             .ok_or_else(|| anyhow!("unsupported target step: {}", ctx.target_step))?;
 
@@ -709,7 +709,7 @@ impl SingleNodeProver {
         });
 
         let executor = Executor::default();
-        let (total_steps, total_segments, _public_values, deferred_inputs, vk_bytes) =
+        let (total_steps, total_segments, public_values, deferred_inputs, vk_bytes) =
             executor.split_streaming(&split_ctx, segment_tx)?;
 
         config_tx
@@ -761,10 +761,10 @@ impl SingleNodeProver {
             None => aggregated_bytes,
         };
 
-        Ok((total_steps, final_proof))
+        Ok((total_steps, final_proof, public_values))
     }
 
-    fn prove_legacy(&self, ctx: &SingleNodeContext) -> anyhow::Result<(u64, Vec<u8>)> {
+    fn prove_legacy(&self, ctx: &SingleNodeContext) -> anyhow::Result<(u64, Vec<u8>, Vec<u8>)> {
         let prover = get_prover();
         let mut network_prove = NetworkProve::new(ctx.seg_size);
         let opts = network_prove.opts;
@@ -856,12 +856,16 @@ impl SingleNodeProver {
             }
         };
 
-        let public_values_stream = public_values.to_vec();
-        // write public values to file
-        let public_values_path = format!("{}/wrap/public_values.bin", ctx.base_dir);
-        file::new(&public_values_path).write_all(&public_values_stream)?;
+        // let public_values_stream = public_values.to_vec();
+        // // write public values to file
+        // let public_values_path = format!("{}/wrap/public_values.bin", ctx.base_dir);
+        // file::new(&public_values_path).write_all(&public_values_stream)?;
 
-        Ok((cycles, serde_json::to_string(&proof)?.into_bytes()))
+        Ok((
+            cycles,
+            serde_json::to_string(&proof)?.into_bytes(),
+            public_values.to_vec(),
+        ))
     }
 }
 

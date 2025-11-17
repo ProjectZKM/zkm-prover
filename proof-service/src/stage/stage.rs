@@ -5,6 +5,7 @@ use crate::stage::tasks::{
     SplitTask, Trace, TASK_STATE_FAILED, TASK_STATE_INITIAL, TASK_STATE_PROCESSING,
     TASK_STATE_SUCCESS, TASK_STATE_UNPROCESSED,
 };
+use common::file;
 use rayon::prelude::*;
 use std::{
     fmt::{Debug, Formatter},
@@ -631,14 +632,20 @@ impl Stage {
             tracing::info!(
                 "Single node task {} success, output size: {}",
                 single_node_task.task_id,
-                single_node_task.output.len()
+                single_node_task.proof.len()
             );
             if self.generate_task.target_step == Step::Agg {
                 // Here we also use snark_path to store agg proof ;
                 let mut f = std::fs::File::create(&self.generate_task.snark_path)
                     .unwrap_or_else(|_| panic!("can not open {}", &self.generate_task.snark_path));
-                f.write_all(&single_node_task.output).unwrap();
+                f.write_all(&single_node_task.proof).unwrap();
             }
+            // store public values
+            let public_values_path =
+                format!("{}/wrap/public_values.bin", single_node_task.base_dir);
+            file::new(&public_values_path)
+                .write_all(&single_node_task.public_values)
+                .unwrap();
             self.step = Step::End;
         } else {
             self.is_error = true;

@@ -164,6 +164,8 @@ message SingleNodeRequest {
 message SingleNodeResponse {
   string proof_id = 1;
   string computed_request_id = 2;
-  bytes output = 3;
-  uint64 total_steps = 4;
-  Result result = 5;}
+  bytes proof = 3;
+  bytes public_values = 4;
+  uint64 total_steps = 5;
+  Result result = 6;
+}

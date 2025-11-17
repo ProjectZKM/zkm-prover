@@ -122,7 +122,7 @@ async fn run_single_node_task(
     if let Ok(single_node_task) = response {
         stage.on_single_node_task(&single_node_task);
         if stage.generate_task.target_step == Step::Snark {
-            result = single_node_task.output;
+            result = single_node_task.proof;
         }
         split_task.total_steps = single_node_task.total_cycles;
         split_task.state = TASK_STATE_SUCCESS;

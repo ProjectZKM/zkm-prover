@@ -20,7 +20,8 @@ pub struct SingleNodeTask {
     pub receipt_inputs: Vec<Vec<u8>>,
     pub target_step: Step,
     pub trace: Trace,
-    pub output: Vec<u8>, // receipt: (reduced proof, vk) or snark proof
+    pub proof: Vec<u8>,
+    pub public_values: Vec<u8>,
     pub seg_size: u32,
     pub total_cycles: u64,
     #[serde(default)]

@@ -351,15 +351,17 @@ impl ProverService for ProverServiceSVC {
             let pipeline = self.pipeline.clone();
             let single_node_func = move || pipeline.prove_single_node(&single_node_context);
             let result = run_back_task(single_node_func).await;
+            let (proof, public_values) = match &result {
+                Ok((_, _, p, pv)) => (p.clone(), pv.clone()),
+                _ => (vec![], vec![]),
+            };
 
             let mut response = SingleNodeResponse {
                 proof_id: request.get_ref().proof_id.clone(),
                 computed_request_id: request.get_ref().computed_request_id.clone(),
                 total_steps: result.clone().unwrap_or_default().1,
-                output: match &result {
-                    Ok((_, _, x)) => x.clone(),
-                    _ => vec![],
-                },
+                proof,
+                public_values,
                 ..Default::default()
             };
 
