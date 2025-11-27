@@ -263,7 +263,7 @@ impl Executor {
                                 }
 
                                 // See if any deferred shards are ready to be committed to.
-                                let mut deferred = deferred.split(done, opts.split_opts);
+                                let mut deferred = deferred.split(done, None, opts.split_opts);
                                 tracing::info!("deferred {} records", deferred.len());
 
                                 // Update the public values & prover state for the shards which do not

@@ -34,4 +34,4 @@ lazy_static = "1.5.0"
 
 [features]
 debug = []
-gpu = ["dep:zkm-gpu-prover", "dep:zkm-gpu-core"]
+gpu = ["dep:zkm-gpu-prover", "dep:zkm-gpu-core", "zkm-gpu-core/pinned-pages"]
