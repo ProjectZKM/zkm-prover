@@ -646,6 +646,11 @@ impl Stage {
             file::new(&public_values_path)
                 .write_all(&single_node_task.public_values)
                 .unwrap();
+            // store vk
+            let vk_path = format!("{}/vk.bin", single_node_task.base_dir);
+            file::new(&vk_path)
+                .write_all(&single_node_task.vk)
+                .unwrap_or_default();
             self.step = Step::End;
         } else {
             self.is_error = true;

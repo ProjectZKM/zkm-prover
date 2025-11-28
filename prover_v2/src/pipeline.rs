@@ -65,10 +65,10 @@ impl Pipeline {
     pub fn prove_single_node(
         &self,
         single_node_context: &SingleNodeContext,
-    ) -> Result<(bool, u64, Vec<u8>, Vec<u8>), String> {
+    ) -> Result<(bool, u64, Vec<u8>, Vec<u8>, Vec<u8>), String> {
         self.single_node_prover
             .prove(single_node_context)
-            .map(|(cycles, proof, public_values)| (true, cycles, proof, public_values))
+            .map(|(cycles, proof, public_values, vk)| (true, cycles, proof, public_values, vk))
             .map_err(|e| {
                 tracing::error!("prove_single_node error {:#?}", e);
                 e.to_string()

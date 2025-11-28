@@ -22,6 +22,7 @@ pub struct SingleNodeTask {
     pub trace: Trace,
     pub proof: Vec<u8>,
     pub public_values: Vec<u8>,
+    pub vk: Vec<u8>,
     pub seg_size: u32,
     pub total_cycles: u64,
     #[serde(default)]

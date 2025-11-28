@@ -166,6 +166,7 @@ message SingleNodeResponse {
   string computed_request_id = 2;
   bytes proof = 3;
   bytes public_values = 4;
-  uint64 total_steps = 5;
-  Result result = 6;
+  bytes vk = 5;
+  uint64 total_steps = 6;
+  Result result = 7;
 }

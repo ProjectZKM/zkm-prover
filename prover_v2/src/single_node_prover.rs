@@ -591,7 +591,12 @@ impl SingleNodeProver {
             proving_key_paths: proving_key_paths.into(),
         }
     }
-    pub fn prove(&self, ctx: &SingleNodeContext) -> anyhow::Result<(u64, Vec<u8>, Vec<u8>)> {
+
+    /// returns (total_steps, proof, public_values, vk_bytes)
+    pub fn prove(
+        &self,
+        ctx: &SingleNodeContext,
+    ) -> anyhow::Result<(u64, Vec<u8>, Vec<u8>, Vec<u8>)> {
         if ctx.local_prover_threads > 1 {
             #[cfg(feature = "gpu")]
             {
@@ -605,7 +610,10 @@ impl SingleNodeProver {
     }
 
     #[cfg(feature = "gpu")]
-    fn prove_in_process(&self, ctx: &SingleNodeContext) -> anyhow::Result<(u64, Vec<u8>, Vec<u8>)> {
+    fn prove_in_process(
+        &self,
+        ctx: &SingleNodeContext,
+    ) -> anyhow::Result<(u64, Vec<u8>, Vec<u8>, Vec<u8>)> {
         let target_step = Step::from_i32(ctx.target_step)
             .ok_or_else(|| anyhow!("unsupported target step: {}", ctx.target_step))?;
 
@@ -716,7 +724,7 @@ impl SingleNodeProver {
             .send(AggregatorConfig {
                 total_segments: total_segments as usize,
                 deferred_inputs,
-                vk_bytes,
+                vk_bytes: vk_bytes.clone(),
             })
             .map_err(|_| anyhow!("aggregator dropped config receiver"))?;
         drop(config_tx);
@@ -761,10 +769,13 @@ impl SingleNodeProver {
             None => aggregated_bytes,
         };
 
-        Ok((total_steps, final_proof, public_values))
+        Ok((total_steps, final_proof, public_values, vk_bytes))
     }
 
-    fn prove_legacy(&self, ctx: &SingleNodeContext) -> anyhow::Result<(u64, Vec<u8>, Vec<u8>)> {
+    fn prove_legacy(
+        &self,
+        ctx: &SingleNodeContext,
+    ) -> anyhow::Result<(u64, Vec<u8>, Vec<u8>, Vec<u8>)> {
         let prover = get_prover();
         let mut network_prove = NetworkProve::new(ctx.seg_size);
         let opts = network_prove.opts;
@@ -815,9 +826,6 @@ impl SingleNodeProver {
         };
         let (pk, vk) = entry.get_or_init_with(|| prover.core_prover.setup(program));
 
-        let vk_bytes = bincode::serialize(&vk)?;
-        file::new(&format!("{}/vk.bin", ctx.base_dir)).write_all(&vk_bytes)?;
-
         let core_proof =
             prover.prove_core(pk, program.clone(), &network_prove.stdin, opts, context)?;
 
@@ -856,15 +864,11 @@ impl SingleNodeProver {
             }
         };
 
-        // let public_values_stream = public_values.to_vec();
-        // // write public values to file
-        // let public_values_path = format!("{}/wrap/public_values.bin", ctx.base_dir);
-        // file::new(&public_values_path).write_all(&public_values_stream)?;
-
         Ok((
             cycles,
             serde_json::to_string(&proof)?.into_bytes(),
             public_values.to_vec(),
+            bincode::serialize(&vk)?,
         ))
     }
 }
