@@ -203,7 +203,7 @@ impl AggProver {
                 .machine()
                 .verify(
                     &vk,
-                    &zkm2_stark::MachineProof {
+                    &zkm_stark::MachineProof {
                         shard_proofs: vec![proof.clone()],
                     },
                     &mut prover.compress_prover.config().challenger(),

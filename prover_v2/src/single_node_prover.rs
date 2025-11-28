@@ -875,6 +875,6 @@ static LOCAL_PROVERS: OnceLock<Arc<MultiGpuProver>> = OnceLock::new();
 #[cfg(feature = "gpu")]
 pub fn get_local_provers() -> Arc<MultiGpuProver> {
     LOCAL_PROVERS
-        .get_or_init(|| Arc::new(MultiGpuProver::autodetect().unwrap()))
+        .get_or_init(|| Arc::new(MultiGpuProver::autodetect(Some(32)).unwrap()))
         .clone()
 }
