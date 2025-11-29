@@ -115,26 +115,31 @@ impl AggProver {
     ) -> anyhow::Result<ZKMProof> {
         // Get the program and witness stream.
         tracing::info!("Agg compress: building program and witness stream");
-        let (program, witness_stream) = tracing::debug_span!("get program and witness stream")
-            .in_scope(|| match input {
+        let (program, witness_stream, is_complete) =
+            tracing::debug_span!("get program and witness stream").in_scope(|| match input {
                 ZKMCircuitWitness::Core(input) => {
                     let mut witness_stream = Vec::new();
                     Witnessable::<InnerConfig>::write(&input, &mut witness_stream);
-                    (prover.recursion_program(&input), witness_stream)
+                    (prover.recursion_program(&input), witness_stream, false)
                 }
                 ZKMCircuitWitness::Deferred(input) => {
                     let mut witness_stream = Vec::new();
                     Witnessable::<InnerConfig>::write(&input, &mut witness_stream);
-                    (prover.deferred_program(&input), witness_stream)
+                    (prover.deferred_program(&input), witness_stream, false)
                 }
                 ZKMCircuitWitness::Compress(input) => {
                     let mut witness_stream = Vec::new();
 
+                    let is_complete = input.is_complete;
                     let input_with_merkle = prover.make_merkle_proofs(input);
 
                     Witnessable::<InnerConfig>::write(&input_with_merkle, &mut witness_stream);
 
-                    (prover.compress_program(&input_with_merkle), witness_stream)
+                    (
+                        prover.compress_program(&input_with_merkle),
+                        witness_stream,
+                        is_complete,
+                    )
                 }
             });
 
@@ -196,19 +201,21 @@ impl AggProver {
                     .unwrap()
             });
 
-            // Verify the proof.
-            #[cfg(feature = "debug")]
-            prover
-                .compress_prover
-                .machine()
-                .verify(
-                    &vk,
-                    &zkm_stark::MachineProof {
-                        shard_proofs: vec![proof.clone()],
-                    },
-                    &mut prover.compress_prover.config().challenger(),
-                )
-                .unwrap();
+            // Verify the proof if in debug mode, or if the proof is final
+            if cfg!(feature = "debug") || is_complete {
+                prover
+                    .compress_prover
+                    .machine()
+                    .verify(
+                        &vk,
+                        &zkm_stark::MachineProof {
+                            shard_proofs: vec![proof.clone()],
+                        },
+                        &mut prover.compress_prover.config().challenger(),
+                    )
+                    .unwrap();
+                tracing::info!("Agg compress: proof verified");
+            }
 
             tracing::info!("Agg compress: proof ready");
             (vk, proof)
