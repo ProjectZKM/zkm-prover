@@ -141,7 +141,7 @@ impl Executor {
             // Spawn the checkpoint generator thread.
             let checkpoint_generator_span = tracing::Span::current().clone();
             let (checkpoints_tx, checkpoints_rx) =
-                sync_channel::<(usize, File, bool)>(opts.checkpoints_channel_capacity);
+                sync_channel::<(usize, File, bool, u64)>(opts.checkpoints_channel_capacity);
             let checkpoint_generator_handle: ScopedJoinHandle<Result<_, ZKMCoreProverError>> = s
                 .spawn(move || {
                     let _span = checkpoint_generator_span.enter();
@@ -170,7 +170,9 @@ impl Executor {
                                 .map_err(ZKMCoreProverError::IoError)?;
 
                             // Send the checkpoint.
-                            checkpoints_tx.send((index, checkpoint_file, done)).unwrap();
+                            checkpoints_tx
+                                .send((index, checkpoint_file, done, runtime.state.global_clk))
+                                .unwrap();
 
                             // If we've reached the final checkpoint, break out of the loop.
                             if done {
@@ -210,7 +212,7 @@ impl Executor {
                         loop {
                             // Receive the latest checkpoint.
                             let received = { checkpoints_rx.lock().unwrap().recv() };
-                            if let Ok((index, mut checkpoint, done)) = received {
+                            if let Ok((index, mut checkpoint, done, num_cycles)) = received {
                                 // Trace the checkpoint and reconstruct the execution records.
                                 let now = Instant::now();
                                 let mut reader = std::io::BufReader::new(&checkpoint);

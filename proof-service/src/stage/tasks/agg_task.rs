@@ -22,7 +22,7 @@ pub struct AggTask {
     pub seg_size: u32,
     // vk for zkm2 core proof
     pub vk: Vec<u8>,
-    #[serde(skip_serializing, skip_deserializing)]
+    // #[serde(skip_serializing, skip_deserializing)]
     pub inputs: Vec<AggregateInput>,
     pub is_final: bool,
     pub is_first_shard: bool,

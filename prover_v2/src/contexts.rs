@@ -71,6 +71,7 @@ pub struct AggContext {
     pub is_first_shard: bool,
     pub is_leaf_layer: bool,
     pub is_deferred: bool,
+    pub agg_index: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

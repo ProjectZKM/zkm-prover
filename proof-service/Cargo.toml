@@ -55,3 +55,5 @@ prover_v2 = ["dep:prover_v2"]
 
 gpu = ["dep:plonky2", "prover/gpu"]
 prover_v2_gpu = ["dep:prover_v2", "prover_v2/gpu"]
+
+debug = ["prover_v2/debug"]

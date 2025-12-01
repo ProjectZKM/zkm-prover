@@ -110,7 +110,7 @@ message ProveResponse {
 message AggregateRequest {
   string proof_id = 1;
   string computed_request_id = 2;
-  //string seg_path = 4;
+  uint32 agg_index = 3;
   optional uint64 block_no = 5;
   uint32 seg_size = 6;
   bytes vk = 7;

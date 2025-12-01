@@ -277,6 +277,7 @@ impl ProverService for ProverServiceSVC {
                 is_first_shard: request.get_ref().is_first_shard,
                 is_leaf_layer: request.get_ref().is_leaf_layer,
                 is_deferred: request.get_ref().is_deferred,
+                agg_index: request.get_ref().agg_index,
             };
 
             let pipeline = self.pipeline.clone();

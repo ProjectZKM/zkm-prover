@@ -404,6 +404,18 @@ impl StageService for StageServiceSVC {
                 file::new(&private_input_stream_path)
                     .write(&request.get_ref().private_input_stream)
                     .map_err(|e| Status::internal(e.to_string()))?;
+
+                // compute input hash
+                let mut hasher = Sha256::new();
+                hasher.update(&request.get_ref().private_input_stream);
+                let private_input_hash = hasher.finalize();
+
+                tracing::info!(
+                    "[generate_proof] {} input hash: {}",
+                    request.get_ref().proof_id,
+                    hex::encode(private_input_hash)
+                );
+
                 private_input_stream_path
             };
 

@@ -4,6 +4,7 @@ use crate::proto::prover_service::v1::{
     SplitElfRequest,
 };
 use common::tls::Config as TlsConfig;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use crate::database::Database;
@@ -342,6 +343,7 @@ pub async fn aggregate(
         let request = AggregateRequest {
             proof_id: agg_task.proof_id.clone(),
             computed_request_id: agg_task.task_id.clone(),
+            agg_index: agg_task.agg_index as u32,
             block_no: agg_task.block_no,
             seg_size: agg_task.seg_size,
             vk: agg_task.vk.clone(),
@@ -390,6 +392,20 @@ pub async fn aggregate(
                     now.elapsed(),
                 );
                 agg_task.output = response.get_ref().agg_receipt.clone();
+
+                if response_result.code == 2 {
+                    // Serialize the task for debugging purposes.
+                    if let Ok(agg_task_debug) = bincode::serialize(&agg_task) {
+                        let filename = &agg_task.task_id;
+                        // Write the serialized task to a file named after the task_id.
+                        if let Ok(mut file) = std::fs::File::create(filename) {
+                            if file.write_all(&agg_task_debug).is_ok() {
+                                tracing::info!("Wrote agg_task debug info to {}", filename);
+                            }
+                        }
+                    }
+                }
+
                 return Some(agg_task);
             }
         } else {
