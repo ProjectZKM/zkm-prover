@@ -64,22 +64,5 @@ zkm-build = { git = "https://github.com/ProjectZKM/Ziren" }
 
 p3-maybe-rayon = { git = "https://github.com/ProjectZKM/Plonky3" }
 
-zkm-gpu-prover = { git = "https://github.com/ProjectZKM/ziren-gpu" }
-zkm-gpu-core = { git = "https://github.com/ProjectZKM/ziren-gpu" }
-
 tempfile = "3.18.0"
 lazy_static = "1.5.0"
-
-#[path."https://github.com/ProjectZKM/Ziren"]
-#zkm-core-machine = { path = "../Ziren/crates/core/machine" }
-#zkm-core-executor = { path = "../Ziren/crates/core/executor" }
-#zkm-stark = { path = "../Ziren/crates/stark" }
-#zkm-prover = { path = "../Ziren/crates/prover" }
-#zkm-recursion-compiler = { path = "../Ziren/crates/recursion/compiler" }
-#zkm-recursion-core = { path = "../Ziren/crates/recursion/core" }
-#zkm-recursion-circuit = { path = "../Ziren/crates/recursion/circuit" }
-#zkm-sdk = { path = "../Ziren/crates/sdk" }
-#
-#[patch."https://github.com/ProjectZKM/ziren-gpu"]
-#zkm-gpu-prover = { path = "../../zkm-gpu/ziren-gpu/prover" }
-#zkm-gpu-core = { path = "../../zkm-gpu/ziren-gpu/core" }

@@ -15,16 +15,16 @@ lru = "0.14.0"
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 
-zkm-core-machine = { git = "https://github.com/ProjectZKM/Ziren" }
-zkm-core-executor = { git = "https://github.com/ProjectZKM/Ziren" }
-zkm-stark = { git = "https://github.com/ProjectZKM/Ziren" }
-zkm-prover = { git = "https://github.com/ProjectZKM/Ziren" }
-zkm-recursion-compiler = { git = "https://github.com/ProjectZKM/Ziren" }
-zkm-recursion-core = { git = "https://github.com/ProjectZKM/Ziren" }
-zkm-recursion-circuit = { git = "https://github.com/ProjectZKM/Ziren" }
-zkm-sdk = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-core-machine.workspace = true
+zkm-core-executor.workspace = true
+zkm-stark.workspace = true
+zkm-prover.workspace = true
+zkm-recursion-compiler.workspace = true
+zkm-recursion-core.workspace = true
+zkm-recursion-circuit.workspace = true
+zkm-sdk.workspace = true
 
-p3-maybe-rayon = { git = "https://github.com/ProjectZKM/Plonky3" }
+p3-maybe-rayon.workspace = true
 
 zkm-gpu-prover = { git = "https://github.com/ProjectZKM/ziren-gpu", branch = "feat/multi-provers", optional = true }
 zkm-gpu-core = { git = "https://github.com/ProjectZKM/ziren-gpu", branch = "feat/multi-provers", optional = true }
