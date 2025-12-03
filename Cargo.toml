@@ -16,7 +16,6 @@ members = [
 ]
 
 [workspace.dependencies]
-prover_v2 = { path = "./prover_v2" }
 common = { path = "./common" }
 
 tonic = { version = "0.8.3", features = ["gzip"] }
@@ -52,6 +51,9 @@ lru = "0.14.0"
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 
+tempfile = "3.18.0"
+lazy_static = "1.5.0"
+
 zkm-core-machine = { git = "https://github.com/ProjectZKM/Ziren" }
 zkm-core-executor = { git = "https://github.com/ProjectZKM/Ziren" }
 zkm-stark = { git = "https://github.com/ProjectZKM/Ziren" }
@@ -63,6 +65,3 @@ zkm-sdk = { git = "https://github.com/ProjectZKM/Ziren" }
 zkm-build = { git = "https://github.com/ProjectZKM/Ziren" }
 
 p3-maybe-rayon = { git = "https://github.com/ProjectZKM/Plonky3" }
-
-tempfile = "3.18.0"
-lazy_static = "1.5.0"

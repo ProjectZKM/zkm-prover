@@ -29,7 +29,7 @@ p3-maybe-rayon.workspace = true
 zkm-gpu-prover = { git = "https://github.com/ProjectZKM/ziren-gpu", branch = "feat/multi-provers", optional = true }
 zkm-gpu-core = { git = "https://github.com/ProjectZKM/ziren-gpu", branch = "feat/multi-provers", optional = true }
 
-common = { path = "../common" }
+common.workspace = true
 tempfile = "3.18.0"
 lazy_static = "1.5.0"
 

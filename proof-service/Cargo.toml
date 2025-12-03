@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-prover_v2 = { workspace = true}
+prover_v2 = { path = "../prover_v2" }
 common = { workspace = true }
 
 bincode.workspace = true
@@ -17,7 +17,7 @@ tokio = { version = "1.21.0", features = ["macros", "rt-multi-thread", "signal"]
 
 once_cell.workspace = true
 uuid.workspace = true
-sqlx.workspace = true 
+sqlx.workspace = true
 serde = "1.0.92"
 serde_json = "1.0"
 serde_derive = "1.0.92"
