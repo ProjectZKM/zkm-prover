@@ -1,5 +1,7 @@
 use crate::database;
-use crate::database::StageTask;
+use crate::database::{Database, StageTask};
+use crate::proto::includes::v1::Step;
+use crate::proto::stage_service;
 use crate::prover_client;
 use crate::stage::{
     stage::get_timestamp,
@@ -8,21 +10,21 @@ use crate::stage::{
     GenerateTask,
 };
 use crate::TlsConfig;
+use anyhow::Context;
 use common::file;
-use std::collections::HashMap;
+// use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
+// use std::sync::Mutex;
+use crate::stage::tasks::SplitTask;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::time;
-
-use crate::proto::includes::v1::Step;
-use crate::proto::stage_service;
+use tracing::{error, info, instrument, warn};
 
 macro_rules! save_task {
     ($task:ident, $db_pool:ident, $type:expr) => {
         if $task.state == TASK_STATE_FAILED || $task.state == TASK_STATE_SUCCESS {
             tracing::info!(
-                "begin to save task: {:?}:{:?} type {:?} status {}",
-                $task.proof_id,
+                "begin to save task: {:?} type {:?} status {}",
                 $task.task_id,
                 $type,
                 $task.state
@@ -46,86 +48,204 @@ macro_rules! save_task {
     };
 }
 
-async fn run_stage_task(
-    node_num: usize,
-    mut task: StageTask,
+/// Helper function to dispatch a task to a prover client in a new tokio task.
+///
+/// This encapsulates the common pattern of:
+/// 1. Spawning a new asynchronous task.
+/// 2. Calling a specific `prover_client` function.
+/// 3. Wrapping the specific result type (e.g., `ProveTask`) into the general `Task` enum.
+/// 4. Sending the wrapped task back through the results channel.
+///
+/// # Type Parameters
+/// * `T`: The specific task type (e.g., `SplitTask`, `ProveTask`).
+/// * `F`: The type of the asynchronous client call function.
+/// * `Fut`: The future returned by the client call.
+/// * `W`: The type of the closure that wraps the result `T` into a `Task`.
+fn dispatch_task<T, F, Fut, W>(
+    task_payload: T,
+    client_call: F,
+    wrapper: W,
+    tx: mpsc::Sender<Task>,
     tls_config: Option<TlsConfig>,
-    db: database::Database,
+    cur_prover_num: Arc<tokio::sync::Mutex<u32>>,
+    max_prover_num: u32,
+) where
+    T: Send + 'static,
+    F: FnOnce(T, Option<TlsConfig>, Arc<tokio::sync::Mutex<u32>>, u32) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Option<T>> + Send,
+    W: FnOnce(T) -> Task + Send + 'static,
+{
+    tokio::spawn(async move {
+        if let Some(response_payload) =
+            client_call(task_payload, tls_config, cur_prover_num, max_prover_num).await
+        {
+            let task_result = wrapper(response_payload);
+            if let Err(e) = tx.send(task_result).await {
+                error!("Failed to send task result back to main loop: {}", e);
+            }
+        }
+    });
+}
+
+/// Handles the logic for a single-node proving task.
+#[instrument(level = "info", skip_all, fields(proof_id = %task.id))]
+async fn run_single_node_task(
+    task: &StageTask,
+    mut stage: Stage,
+    tls_config: Option<TlsConfig>,
+    db: &Database,
+    task_start_time: std::time::Instant,
 ) {
-    if let Some(context) = task.context {
+    if task.step != Step::Init as i32 {
+        tracing::debug!("single node task, but it has already been processed");
+        return;
+    }
+
+    let single_node_task = stage.get_single_node_task();
+    let mut split_task = SplitTask {
+        task_id: uuid::Uuid::new_v4().to_string(),
+        proof_id: single_node_task.proof_id.clone(),
+        ..Default::default()
+    };
+
+    let response = prover_client::single_node(
+        single_node_task,
+        tls_config,
+        db.clone(),
+        &task.id,
+        task.check_at as u64,
+        get_timestamp(),
+    )
+    .await;
+
+    let mut result = vec![];
+    if let Ok(single_node_task) = response {
+        stage.on_single_node_task(&single_node_task);
+        if stage.generate_task.target_step == Step::Snark {
+            result = single_node_task.proof;
+        }
+        split_task.total_steps = single_node_task.total_cycles;
+        split_task.state = TASK_STATE_SUCCESS;
+    } else {
+        stage.is_error = true;
+        split_task.state = TASK_STATE_FAILED;
+    }
+    save_task!(split_task, db, TASK_ITYPE_SPLIT);
+
+    // Finalize task status in the database
+    finalize_stage_task(task, &stage, task_start_time, result, db).await;
+}
+
+#[instrument(level = "info", skip_all, fields(proof_id = %task.id))]
+async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: Database) {
+    info!("Running stage task");
+    if let Some(ref context) = task.context {
         let task_decoded = serde_json::from_str::<GenerateTask>(&context);
         match task_decoded {
             Ok(generate_context) => {
-                let mut check_at = get_timestamp();
+                let task_start_time = std::time::Instant::now();
+
                 let mut stage = Stage::new(generate_context.clone());
-                let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+
+                // single node handler.
+                if generate_context.single_node {
+                    run_single_node_task(&task, stage, tls_config, &db, task_start_time).await;
+                    return;
+                }
+
+                // Distributed (multi-node) handler
+                let mut check_at = get_timestamp();
+                let (tx, mut rx) = mpsc::channel(128);
                 stage.dispatch();
+
+                // update db, record the latest status and step
+                let _ = db
+                    .update_stage_task_check_at(
+                        &task.id,
+                        task.check_at as u64,
+                        check_at,
+                        stage.step.into(),
+                    )
+                    .await;
+                task.check_at = check_at as i64;
+                check_at = get_timestamp();
+
                 let mut interval = time::interval(time::Duration::from_millis(200));
+                let max_prover_num = stage.generate_task.max_prover_num;
+                let cur_prover_num = Arc::new(tokio::sync::Mutex::new(0u32));
                 loop {
                     let current_step = stage.step;
                     match stage.step {
                         Step::Prove => {
-                            let split_task = stage.get_split_task();
-                            if let Some(split_task) = split_task {
-                                let tx = tx.clone();
-                                let tls_config = tls_config.clone();
-                                tokio::spawn(async move {
-                                    let response =
-                                        prover_client::split(split_task, tls_config).await;
-                                    if let Some(split_task) = response {
-                                        let _ = tx.send(Task::Split(split_task)).await;
-                                    }
-                                });
+                            // Dispatch split tasks.
+                            if let Some(task_payload) = stage.get_split_task() {
+                                dispatch_task(
+                                    task_payload,
+                                    prover_client::split,
+                                    Task::Split,
+                                    tx.clone(),
+                                    tls_config.clone(),
+                                    cur_prover_num.clone(),
+                                    max_prover_num,
+                                );
                             }
-                            // This is a temporary workaround.
-                            if stage.count_processing_prove_tasks() < node_num {
-                                if let Some(prove_task) = stage.get_prove_task() {
-                                    let tx = tx.clone();
-                                    let tls_config = tls_config.clone();
-                                    tokio::spawn(async move {
-                                        let response =
-                                            prover_client::prove(prove_task, tls_config).await;
-                                        if let Some(prove_task) = response {
-                                            let _ = tx.send(Task::Prove(prove_task)).await;
-                                        }
-                                    });
+
+                            // Dispatch prove tasks until the concurrent prover limit is reached.
+                            while stage.count_processing_prove_tasks() < max_prover_num as usize {
+                                if let Some(task_payload) = stage.get_prove_task() {
+                                    dispatch_task(
+                                        task_payload,
+                                        prover_client::prove,
+                                        Task::Prove,
+                                        tx.clone(),
+                                        tls_config.clone(),
+                                        cur_prover_num.clone(),
+                                        max_prover_num,
+                                    );
+                                } else {
+                                    // No more prove tasks available, break the inner loop.
+                                    break;
                                 }
                             }
 
-                            if stage.is_tasks_gen_done
-                                && stage.count_unfinished_prove_tasks() < node_num
+                            // Dispatch aggregate tasks if conditions are met.
+                            while stage.is_tasks_gen_done
+                                && stage.count_unfinished_prove_tasks() < max_prover_num as usize
                             {
-                                let agg_task = stage.get_agg_task();
-                                tracing::debug!("get_agg_task: {:?}", agg_task.is_some());
-                                if let Some(agg_task) = agg_task {
-                                    let tx = tx.clone();
-                                    let tls_config = tls_config.clone();
-                                    tokio::spawn(async move {
-                                        let response =
-                                            prover_client::aggregate(agg_task, tls_config).await;
-                                        if let Some(agg_task) = response {
-                                            let _ = tx.send(Task::Agg(agg_task)).await;
-                                        }
-                                    });
+                                if let Some(task_payload) = stage.get_agg_task() {
+                                    tracing::debug!("get_agg_task: true");
+                                    dispatch_task(
+                                        task_payload,
+                                        prover_client::aggregate,
+                                        Task::Agg,
+                                        tx.clone(),
+                                        tls_config.clone(),
+                                        cur_prover_num.clone(),
+                                        max_prover_num,
+                                    );
+                                } else {
+                                    // No more aggregation tasks available, break the inner loop.
+                                    tracing::debug!("get_agg_task: false");
+                                    break;
                                 }
                             }
                         }
                         Step::Snark => {
-                            let snark_task = stage.get_snark_task();
-                            if let Some(snark_task) = snark_task {
-                                let tx = tx.clone();
-                                let tls_config = tls_config.clone();
-                                tokio::spawn(async move {
-                                    let response =
-                                        prover_client::snark_proof(snark_task, tls_config).await;
-                                    if let Some(snark_task) = response {
-                                        let _ = tx.send(Task::Snark(snark_task)).await;
-                                    }
-                                });
+                            if let Some(task_payload) = stage.get_snark_task() {
+                                dispatch_task(
+                                    task_payload,
+                                    prover_client::snark_proof,
+                                    Task::Snark,
+                                    tx.clone(),
+                                    tls_config.clone(),
+                                    cur_prover_num.clone(),
+                                    max_prover_num,
+                                );
                             }
                         }
                         _ => {}
                     }
+
                     tokio::select! {
                         task = rx.recv() => {
                             if let Some(task) = task {
@@ -156,6 +276,7 @@ async fn run_stage_task(
                         break;
                     }
                     stage.dispatch();
+
                     let ts_now = get_timestamp();
                     if check_at + 10 < ts_now || current_step != stage.step {
                         check_at = ts_now;
@@ -174,34 +295,15 @@ async fn run_stage_task(
                         }
                     }
                 }
-                if stage.is_error() {
-                    let get_status = || match stage.step {
-                        Step::Split => stage_service::v1::Status::SplitError,
-                        Step::Prove => stage_service::v1::Status::ProveError,
-                        Step::Agg => stage_service::v1::Status::AggError,
-                        Step::Snark => stage_service::v1::Status::SnarkError,
-                        _ => stage_service::v1::Status::InternalError,
-                    };
-                    let status = get_status();
-                    db.update_stage_task(&task.id, status.into(), "")
-                        .await
-                        .unwrap();
+
+                let result = if stage.is_success() && generate_context.target_step == Step::Snark {
+                    file::new(&generate_context.snark_path)
+                        .read()
+                        .unwrap_or_default()
                 } else {
-                    // If generate compressed proof, do not store in database, use file instead.
-                    let result = if generate_context.target_step == Step::Snark {
-                        file::new(&generate_context.snark_path).read().unwrap()
-                    } else {
-                        vec![]
-                    };
-                    db.update_stage_task(
-                        &task.id,
-                        stage_service::v1::Status::Success.into(),
-                        &String::from_utf8(result).expect("Invalid UTF-8 bytes"),
-                    )
-                    .await
-                    .unwrap();
-                    tracing::info!("[stage] finished {:?} ", stage);
-                }
+                    vec![]
+                };
+                finalize_stage_task(&task, &stage, task_start_time, result, &db).await;
             }
             Err(_) => {
                 let _ = db
@@ -216,68 +318,139 @@ async fn run_stage_task(
     }
 }
 
-async fn load_stage_task(node_num: usize, tls_config: Option<TlsConfig>, db: database::Database) {
-    let store = Arc::new(Mutex::new(HashMap::new()));
-    loop {
-        let limit = 5;
-        let status = stage_service::v1::Status::Computing.into();
-        let check_at = get_timestamp();
-        // FIXME: why do we just fetch the task in last 1 min?
-        let result = db
-            .get_incomplete_stage_tasks(status, (check_at - 60) as i64, limit)
-            .await;
-        match result {
-            Ok(tasks) => {
-                if tasks.is_empty() {
-                    time::sleep(time::Duration::from_secs(1)).await;
-                } else {
-                    for mut task in tasks {
-                        {
-                            if store.lock().unwrap().contains_key(&task.id) {
-                                continue;
-                            }
-                            let rows_affected = db
-                                .update_stage_task_check_at(
-                                    &task.id,
-                                    task.check_at as u64,
-                                    check_at,
-                                    task.step,
-                                )
-                                .await;
-                            if let Ok(rows_affected) = rows_affected {
-                                if rows_affected == 1 {
-                                    task.check_at = check_at as i64;
-                                    store.lock().unwrap().insert(task.id.clone(), check_at);
-                                    let store_arc = store.clone();
-                                    let tls_config_copy = tls_config.clone();
-                                    let db_copy = db.clone();
-                                    tokio::spawn(async move {
-                                        let id = task.id.clone();
-                                        run_stage_task(node_num, task, tls_config_copy, db_copy)
-                                            .await;
-                                        store_arc.lock().unwrap().remove(&id);
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!("{:?}", e);
-                time::sleep(time::Duration::from_secs(10)).await;
-            }
+/// Updates the final status of a StageTask in the database after it has completed or failed.
+async fn finalize_stage_task(
+    task: &StageTask,
+    stage: &Stage,
+    task_start_time: std::time::Instant,
+    result: Vec<u8>,
+    db: &Database,
+) {
+    if stage.is_error() {
+        let get_status = || match stage.step {
+            Step::Split => stage_service::v1::Status::SplitError,
+            Step::Prove => stage_service::v1::Status::ProveError,
+            Step::Agg => stage_service::v1::Status::AggError,
+            Step::Snark => stage_service::v1::Status::SnarkError,
+            _ => stage_service::v1::Status::InternalError,
+        };
+        let status = get_status();
+        if let Err(e) = db.update_stage_task(&task.id, status.into(), "").await {
+            error!("Failed to update stage task to error status: {:?}", e);
         }
+    } else if stage.is_success() {
+        // Task is successful
+        let task_duration = task_start_time.elapsed().as_millis() as u64;
+
+        // update the step, and store the duration in the `check_at` field.
+        if let Err(e) = db
+            .update_stage_task_check_at(
+                &task.id,
+                task.check_at as u64,
+                task_duration,
+                stage.step.into(),
+            )
+            .await
+        {
+            error!("Failed to update stage task check_at on success: {:?}", e);
+        }
+
+        let result_str = String::from_utf8(result).expect("Invalid UTF-8 bytes in proof result");
+        if let Err(e) = db
+            .update_stage_task(
+                &task.id,
+                stage_service::v1::Status::Success.into(),
+                &result_str,
+            )
+            .await
+        {
+            error!("Failed to update stage task to success status: {:?}", e);
+        }
+
+        info!(
+            "[stage] finished {:?} total_time {} ms",
+            stage, task_duration
+        );
     }
 }
 
-pub async fn start(
-    node_num: usize,
-    tls_config: Option<TlsConfig>,
-    db: database::Database,
-) -> anyhow::Result<bool> {
-    tokio::spawn(async move {
-        load_stage_task(node_num, tls_config, db).await;
-    });
-    Ok(true)
+pub struct TaskManager {
+    pub db: Database,
+    task_receiver: mpsc::Receiver<StageTask>,
+    pub semaphore: Arc<Semaphore>,
+}
+
+impl TaskManager {
+    pub fn new(
+        db: Database,
+        max_concurrent_tasks: Option<usize>,
+    ) -> (Self, mpsc::Sender<StageTask>) {
+        let max_concurrent_tasks = max_concurrent_tasks.unwrap_or(1);
+        let (task_sender, task_receiver) = mpsc::channel(256);
+        let semaphore = Arc::new(Semaphore::new(max_concurrent_tasks));
+        (
+            Self {
+                db,
+                task_receiver,
+                semaphore,
+            },
+            task_sender,
+        )
+    }
+
+    pub async fn process_tasks(&mut self, tls_config: Option<TlsConfig>) {
+        info!("Starting task processor...");
+
+        while let Some(task) = self.task_receiver.recv().await {
+            let permit = self.semaphore.clone().acquire_owned().await.unwrap();
+
+            let tls_clone = tls_config.clone();
+            let db = self.db.clone();
+            tokio::spawn(async move {
+                run_stage_task(task, tls_clone, db).await;
+                drop(permit);
+            });
+        }
+    }
+
+    pub fn start(mut self, tls: Option<TlsConfig>) {
+        tokio::spawn(async move { self.process_tasks(tls).await });
+    }
+
+    pub async fn load_incomplete_tasks_from_db(
+        &self,
+        task_sender: mpsc::Sender<StageTask>,
+    ) -> anyhow::Result<mpsc::Sender<StageTask>> {
+        info!("Loading incomplete tasks from database...");
+
+        let tasks = self
+            .db
+            .get_incomplete_stage_tasks(
+                stage_service::v1::Status::Computing.into(),
+                get_timestamp() as i64,
+                i32::MAX,
+            )
+            .await
+            .context("Failed to load incomplete tasks from database")?;
+
+        info!("Found {} incomplete tasks", tasks.len());
+
+        let mut loaded_count = 0;
+        for task in tasks {
+            match task_sender.try_send(task) {
+                Ok(()) => loaded_count += 1,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!("Task queue is full, stopping load");
+                    break;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    error!("Task queue is closed");
+                    break;
+                }
+            }
+        }
+        info!("Loaded {loaded_count} tasks to memory queue");
+
+        Ok(task_sender)
+    }
 }

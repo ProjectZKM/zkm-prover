@@ -5,17 +5,13 @@ use crate::proto::stage_service::v1::{
 };
 use anyhow::Error;
 use common::tls::Config as TlsConfig;
-use std::sync::Mutex;
 
-use crate::stage::{stage_worker, tasks, GenerateTask};
+use crate::stage::{tasks, GenerateTask};
 
 use tonic::{Request, Response, Status};
 
 use crate::config;
 use common::file;
-
-#[cfg(feature = "prover")]
-use prover::provers;
 
 use ethers::types::Signature;
 use sha2::{Digest, Sha256};
@@ -25,17 +21,15 @@ use std::str::FromStr;
 use crate::database;
 use crate::metrics;
 
+use crate::database::StageTask;
 use crate::proto::includes::v1::{ProverVersion, Step};
-use lazy_static::lazy_static;
-use std::collections::HashMap;
-
-lazy_static! {
-    static ref GLOBAL_TASKMAP: Mutex<HashMap<String, i32>> = Mutex::new(HashMap::new());
-}
+use crate::stage::stage_worker::TaskManager;
+use tokio::sync::mpsc;
 
 pub struct StageServiceSVC {
     db: database::Database,
     config: config::RuntimeConfig,
+    tx: mpsc::Sender<StageTask>,
 }
 
 impl StageServiceSVC {
@@ -55,9 +49,13 @@ impl StageServiceSVC {
         let database_url = config.database_url.as_str();
         let db = database::Database::new(database_url);
         sqlx::migrate!("./migrations").run(&db.db_pool).await?;
-        let _ =
-            stage_worker::start(config.prover_addrs.len(), tls_config.clone(), db.clone()).await;
-        Ok(StageServiceSVC { db, config })
+
+        let (task_manager, tx) = TaskManager::new(db.clone(), config.max_concurrent_tasks);
+        let tx = task_manager.load_incomplete_tasks_from_db(tx).await?;
+
+        task_manager.start(tls_config);
+
+        Ok(StageServiceSVC { db, config, tx })
     }
 
     pub fn verify_signature(&self, request: &GenerateProofRequest) -> Result<String, Error> {
@@ -90,6 +88,7 @@ impl StageService for StageServiceSVC {
             if let Ok(task) = task {
                 response.status = task.status;
                 response.step = task.step;
+                response.proving_time = task.check_at as u64;
                 let execute_info: Vec<tasks::SplitTask> = self
                     .db
                     .get_prove_task_infos(&request.get_ref().proof_id, tasks::TASK_ITYPE_SPLIT)
@@ -129,29 +128,14 @@ impl StageService for StageServiceSVC {
                 };
                 if target_step != Step::Split && !composite_proof {
                     if let Some(result) = task.result {
-                        response.proof_with_public_inputs = if target_step == Step::Agg {
-                            file::new(&proof_path).read().unwrap()
-                        } else {
-                            result.into_bytes()
-                        };
+                        response.proof_with_public_inputs =
+                            if target_step == Step::Agg && task.status == 0 {
+                                file::new(&proof_path).read().unwrap_or_default()
+                            } else {
+                                result.into_bytes()
+                            };
                     }
                     if let Some(fileserver_url) = &self.config.fileserver_url {
-                        #[cfg(feature = "prover")]
-                        if target_step == Step::Snark {
-                            response.snark_proof_url = format!(
-                                "{}/{}/snark/proof_with_public_inputs.json",
-                                fileserver_url,
-                                request.get_ref().proof_id
-                            );
-                            response.stark_proof_url = format!(
-                                "{}/{}/wrap/proof_with_public_inputs.json",
-                                fileserver_url,
-                                request.get_ref().proof_id
-                            );
-                        }
-                        #[cfg(feature = "prover")]
-                        let suffix = "json";
-                        #[cfg(feature = "prover_v2")]
                         let suffix = "bin";
                         response.public_values_url = format!(
                             "{}/{}/wrap/public_values.{}",
@@ -178,29 +162,6 @@ impl StageService for StageServiceSVC {
             tracing::info!("[generate_proof] {} start", request.get_ref().proof_id);
 
             // check seg_size
-            #[cfg(feature = "prover")]
-            if !request.get_ref().composite_proof
-                && !provers::valid_seg_size(request.get_ref().seg_size as usize)
-            {
-                let response = GenerateProofResponse {
-                    proof_id: request.get_ref().proof_id.clone(),
-                    status: InvalidParameter.into(),
-                    error_message: format!(
-                        "invalid seg_size support [{}-{}]",
-                        provers::MIN_SEG_SIZE,
-                        provers::MAX_SEG_SIZE
-                    ),
-                    ..Default::default()
-                };
-                tracing::warn!(
-                    "[generate_proof] {} invalid seg_size support [{}-{}] {}",
-                    request.get_ref().proof_id,
-                    request.get_ref().seg_size,
-                    provers::MIN_SEG_SIZE,
-                    provers::MAX_SEG_SIZE
-                );
-                return Ok(Response::new(response));
-            }
             // check signature
             let user_address: String;
             match self.verify_signature(request.get_ref()) {
@@ -245,6 +206,24 @@ impl StageService for StageServiceSVC {
                 }
             }
 
+            let from_step = request.get_ref().from_step.unwrap_or(Step::Init.into());
+            let single_node = request.get_ref().single_node;
+            if !(from_step == Step::Init as i32 || from_step == Step::Agg as i32) {
+                let response = GenerateProofResponse {
+                    proof_id: request.get_ref().proof_id.clone(),
+                    status: InvalidParameter.into(),
+                    error_message: "invalid FromStep, only Support Init and Agg".to_string(),
+                    ..Default::default()
+                };
+                tracing::warn!(
+                    "[generate_proof] {} invalid TargetStep {:?}",
+                    request.get_ref().proof_id,
+                    from_step,
+                );
+                return Ok(Response::new(response));
+            }
+            let from_step = Step::from_i32(from_step).unwrap();
+
             let target_step = request.get_ref().target_step.unwrap_or(Step::Snark.into());
             if !(target_step == Step::Split as i32
                 || target_step == Step::Agg as i32
@@ -267,14 +246,95 @@ impl StageService for StageServiceSVC {
             let target_step = Step::from_i32(target_step).unwrap();
 
             let base_dir = self.config.base_dir.clone();
+
+            // check elf_data or elf_id
+            // If elf_data is empty, and from_step is Init, elf_id should exist.
+            let (elf_path, elf_id) = {
+                if from_step == Step::Init {
+                    let elf_dir = format!("{}/elf", base_dir);
+                    if request.get_ref().elf_data.is_empty() {
+                        // check if elf_id exists
+                        if request.get_ref().elf_id.is_none() {
+                            let response = GenerateProofResponse {
+                                proof_id: request.get_ref().proof_id.clone(),
+                                status: InvalidParameter.into(),
+                                error_message: "elf_data or elf_id should not be empty".to_string(),
+                                ..Default::default()
+                            };
+                            tracing::warn!(
+                                "[generate_proof] {} elf_data or elf_id should not be empty",
+                                request.get_ref().proof_id,
+                            );
+                            return Ok(Response::new(response));
+                        } else {
+                            let elf_id = request.get_ref().elf_id.clone().unwrap();
+                            // remove "0x" if exists
+                            let elf_id = elf_id.strip_prefix("0x").unwrap_or(&elf_id);
+                            let elf_path = format!("{}/{}", elf_dir, elf_id);
+                            if !std::path::Path::new(&elf_path).exists() {
+                                let response = GenerateProofResponse {
+                                    proof_id: request.get_ref().proof_id.clone(),
+                                    status: InvalidParameter.into(),
+                                    error_message: "elf_id not found".to_string(),
+                                    ..Default::default()
+                                };
+                                tracing::warn!(
+                                    "[generate_proof] {} elf_id not found",
+                                    request.get_ref().proof_id,
+                                );
+                                return Ok(Response::new(response));
+                            }
+                            tracing::info!(
+                                "[generate_proof] {} elf_id found cache: {}",
+                                request.get_ref().proof_id,
+                                elf_id
+                            );
+                            (elf_path, elf_id.to_string())
+                        }
+                    } else {
+                        // compute elf_id
+                        let mut hasher = Sha256::new();
+                        hasher.update(&request.get_ref().elf_data);
+                        let elf_hash = hasher.finalize();
+                        let elf_id = hex::encode(elf_hash);
+
+                        let elf_path = format!("{}/{}", elf_dir, elf_id);
+                        if !std::path::Path::new(&elf_path).exists() {
+                            tracing::info!(
+                                "[generate_proof] {} elf_id not found, write to cache: {}",
+                                request.get_ref().proof_id,
+                                elf_path
+                            );
+
+                            file::new(&elf_path)
+                                .write(&request.get_ref().elf_data)
+                                .map_err(|e| {
+                                    tracing::error!(
+                                        "[generate_proof] {} write elf_data to {} failed: {:?}",
+                                        request.get_ref().proof_id,
+                                        elf_path,
+                                        e
+                                    );
+                                    Status::internal(e.to_string())
+                                })?;
+                        } else {
+                            tracing::info!(
+                                "[generate_proof] {} elf_id found cache but provided: {}",
+                                request.get_ref().proof_id,
+                                elf_id
+                            );
+                        }
+
+                        (elf_path, elf_id)
+                    }
+                } else {
+                    (String::new(), String::new())
+                }
+            };
+
             let dir_path = format!("{}/proof/{}", base_dir, request.get_ref().proof_id);
             file::new(&dir_path)
                 .create_dir_all()
-                .map_err(|e| Status::internal(e.to_string()))?;
-
-            let elf_path = format!("{}/elf", dir_path);
-            file::new(&elf_path)
-                .write(&request.get_ref().elf_data)
                 .map_err(|e| Status::internal(e.to_string()))?;
 
             let block_no = request.get_ref().block_no.unwrap_or(0u64);
@@ -314,6 +374,35 @@ impl StageService for StageServiceSVC {
                 private_input_stream_path
             };
 
+            if from_step == Step::Agg {
+                // if from_step is Agg, we need to check if the receipt_inputs is empty
+                // or the single node is true
+                if request.get_ref().receipt_inputs.is_empty() || single_node {
+                    let response = GenerateProofResponse {
+                        proof_id: request.get_ref().proof_id.clone(),
+                        status: InvalidParameter.into(),
+                        error_message: "receipt_inputs should not empty".to_string(),
+                        ..Default::default()
+                    };
+                    tracing::warn!(
+                        "[generate_proof] {} empty receipt_inputs",
+                        request.get_ref().proof_id,
+                    );
+                    return Ok(Response::new(response));
+                }
+            }
+            let mut max_prover_num = request.get_ref().max_prover_num;
+            if !single_node {
+                let available_provers = self.config.prover_addrs.len() as u32;
+                if max_prover_num == 0 {
+                    // In single node mode, if 0, it means use all available provers.
+                    max_prover_num = available_provers;
+                } else {
+                    // Otherwise, cap the number to the maximum available provers.
+                    max_prover_num = std::cmp::min(max_prover_num, available_provers);
+                }
+            }
+
             let receipt_inputs_path = if request.get_ref().receipt_inputs.is_empty() {
                 "".to_string()
             } else {
@@ -345,11 +434,7 @@ impl StageService for StageServiceSVC {
                 .create_dir_all()
                 .map_err(|e| Status::internal(e.to_string()))?;
 
-            let output_stream_path = if cfg!(feature = "prover") {
-                format!("{}/{}", output_stream_dir, "output_stream")
-            } else {
-                String::new()
-            };
+            let output_stream_path = String::new();
 
             let seg_path = format!("{}/segment", dir_path);
             file::new(&seg_path)
@@ -368,26 +453,30 @@ impl StageService for StageServiceSVC {
             file::new(&wrap_dir)
                 .create_dir_all()
                 .map_err(|e| Status::internal(e.to_string()))?;
+
+            // if from_step == Agg, we need write dummy data to public values in case of panic
+            if from_step == Step::Agg {
+                let public_values_path = {
+                    let suffix = "bin";
+                    format!("{}/public_values.{}", wrap_dir, suffix)
+                };
+                // Write empty vector to public_values_path file
+                file::new(&public_values_path)
+                    .write(&[])
+                    .map_err(|e| Status::internal(e.to_string()))?;
+            }
+
             let snark_dir = format!("{}/snark", dir_path);
             file::new(&snark_dir)
                 .create_dir_all()
                 .map_err(|e| Status::internal(e.to_string()))?;
             let snark_path = format!("{}/proof_with_public_inputs.json", snark_dir);
 
-            let prover_version = if cfg!(feature = "prover") {
-                ProverVersion::Zkm
-            } else if cfg!(feature = "prover_v2") {
-                ProverVersion::Zkm2
-            } else {
-                return Err(Status::internal("ProverVersion error"));
-            };
-            // compute program id
-            let mut hasher = Sha256::new();
-            hasher.update(&request.get_ref().elf_data);
-            let elf_hash = hasher.finalize();
+            let prover_version = ProverVersion::Zkm2;
+
             let generate_task = GenerateTask::new(
                 prover_version,
-                hex::encode(elf_hash),
+                elf_id,
                 &request.get_ref().proof_id,
                 &dir_path,
                 &elf_path,
@@ -400,11 +489,24 @@ impl StageService for StageServiceSVC {
                 &output_stream_path,
                 Some(block_no),
                 request.get_ref().seg_size,
+                max_prover_num,
+                from_step,
                 target_step,
+                single_node,
                 request.get_ref().composite_proof,
                 &receipt_inputs_path,
                 &receipts_path,
             );
+
+            let context = serde_json::to_string(&generate_task).map_err(|e| {
+                Status::internal(format!("Failed to serialize GenerateTask context: {}", e))
+            })?;
+            let stage_task = StageTask {
+                id: generate_task.proof_id.clone(),
+                status: Computing.into(),
+                context: Some(context.clone()),
+                ..Default::default()
+            };
 
             let _ = self
                 .db
@@ -412,32 +514,23 @@ impl StageService for StageServiceSVC {
                     &request.get_ref().proof_id,
                     &user_address,
                     Computing.into(),
-                    &serde_json::to_string(&generate_task).unwrap(),
+                    &context,
                 )
-                .await;
+                .await
+                .map_err(|e| {
+                    Status::internal(format!("Failed to insert task into database: {}", e))
+                })?;
+
+            self.tx
+                .send(stage_task)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to send task to queue: {}", e)))?;
+
             // TODO: we use the stage server as the file server, any better way?
             let mut snark_proof_url = String::new();
             let mut stark_proof_url = String::new();
-            #[cfg(feature = "prover")]
-            if let Some(fileserver_url) = &self.config.fileserver_url {
-                if target_step == Step::Snark {
-                    snark_proof_url = format!(
-                        "{}/{}/snark/proof_with_public_inputs.json",
-                        fileserver_url,
-                        request.get_ref().proof_id
-                    );
-                    stark_proof_url = format!(
-                        "{}/{}/wrap/proof_with_public_inputs.json",
-                        fileserver_url,
-                        request.get_ref().proof_id
-                    );
-                }
-            };
             let mut public_values_url = match &self.config.fileserver_url {
                 Some(fileserver_url) => {
-                    #[cfg(feature = "prover")]
-                    let suffix = "json";
-                    #[cfg(feature = "prover_v2")]
                     let suffix = "bin";
                     format!(
                         "{}/{}/wrap/public_values.{}",

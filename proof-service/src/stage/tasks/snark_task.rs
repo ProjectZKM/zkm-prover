@@ -14,6 +14,7 @@ pub struct SnarkTask {
 
     #[serde(skip_serializing, skip_deserializing)]
     pub agg_receipt: Vec<u8>,
+    pub from_input: bool,
 
     #[serde(skip_serializing, skip_deserializing)]
     pub output: Vec<u8>, //snark_proof_with_public_inputs

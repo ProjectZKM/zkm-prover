@@ -30,6 +30,7 @@ service ProverService {
   rpc Prove(ProveRequest) returns (ProveResponse) {}
   rpc Aggregate(AggregateRequest) returns (AggregateResponse) {}
   rpc SnarkProof(SnarkProofRequest) returns (SnarkProofResponse) {}
+  rpc SingleNode(SingleNodeRequest) returns (SingleNodeResponse) {}
 }
 
 message GetStatusRequest {}
@@ -134,6 +135,7 @@ message SnarkProofRequest {
   string computed_request_id = 2;
   includes.v1.ProverVersion version = 3;
   bytes agg_receipt = 4;
+  bool from_input = 5; // if true, the agg_receipt is from input, otherwise it is from agg output
 }
 
 message SnarkProofResponse {
@@ -141,4 +143,30 @@ message SnarkProofResponse {
   string computed_request_id = 2;
   bytes snark_proof_with_public_inputs = 3;
   Result result = 4;
+}
+
+message SingleNodeRequest {
+  string proof_id = 1;
+  string computed_request_id = 2;
+  string base_dir = 3;
+  string elf_path = 4;
+  string private_input_path = 5;
+  string receipt_inputs_path = 6;
+  string program_id = 7;
+  includes.v1.Step target_step = 8;
+  uint32 seg_size = 9;
+  bytes elf = 10;
+  repeated bytes private_inputs = 11;
+  repeated bytes receipt_inputs = 12;
+  uint32 local_prover_threads = 13;
+}
+
+message SingleNodeResponse {
+  string proof_id = 1;
+  string computed_request_id = 2;
+  bytes proof = 3;
+  bytes public_values = 4;
+  bytes vk = 5;
+  uint64 total_steps = 6;
+  Result result = 7;
 }

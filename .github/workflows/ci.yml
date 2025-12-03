@@ -36,12 +36,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-07-17
       - name: Install Dependencies
-        run: sudo apt install protobuf-compiler
-      - name: Cargo Test with prover
-        run: cargo test --release --features=prover
-      - name: Cargo Test with prover_v2
-        run: cargo test --release --features=prover_v2
+        run: sudo apt update && sudo apt install protobuf-compiler
+      - run: curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/ProjectZKM/toolchain/refs/heads/main/setup.sh | sh
+      - run: source ~/.zkm-toolchain/env && cargo test --release
 
   clippy:
     name: Clippy
@@ -49,11 +49,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2025-07-17
+      - run: curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/ProjectZKM/toolchain/refs/heads/main/setup.sh | sh
+      - run: source ~/.zkm-toolchain/env && cargo build
       - name: Install Dependencies
-        run: sudo apt install protobuf-compiler
-      - run: rustup component add clippy
-      - run: cargo clippy --features=prover --all-targets -- -D warnings
-      - run: cargo clippy --features=prover_v2 --all-targets -- -D warnings
+        run: sudo apt update && sudo apt install protobuf-compiler
+      - run: cargo clippy --all-targets -- -D warnings
 
   fmt:
     name: Rustfmt

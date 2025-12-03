@@ -6,22 +6,18 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-prover = { path = "../prover", optional = true }
-prover_v2 = { path = "../prover_v2", optional = true }
+prover_v2 = { path = "../prover_v2" }
+common = { workspace = true }
 
-plonky2 = { git = "https://github.com/zkMIPS/plonky2.git", branch = "zkm_dev", optional = true }
+bincode.workspace = true
 
-common = { path = "../common" }
-
-bincode = "1.3.3"
-
-tonic = "0.8.3"
-prost = "0.11.0"
+tonic = { workspace = true, features = ["gzip"] }
+prost.workspace = true
 tokio = { version = "1.21.0", features = ["macros", "rt-multi-thread", "signal"] }
 
-once_cell = "1.8"
-uuid = { version = "1.2", features = ["v4", "fast-rng", "macro-diagnostics"] }
-sqlx = { version = "0.8.1", features = ["mysql", "time", "runtime-tokio"] }
+once_cell.workspace = true
+uuid.workspace = true
+sqlx.workspace = true
 serde = "1.0.92"
 serde_json = "1.0"
 serde_derive = "1.0.92"
@@ -39,18 +35,18 @@ rand = "0.8"
 sha2 = "0.10.9"
 
 # file server
-warp = "0.3"
 tracing = "0.1.37"
 tracing-forest = { version = "0.1.6", features = ["ansi", "smallvec"] }
 tracing-subscriber = { version = "0.3.19", features = ["std", "env-filter"] }
 rayon = "1.10.0"
+
+[[bin]]
+name = "proof-service"
+path = "src/bin/proof-service.rs"
 
 [build-dependencies]
 tonic-build = "0.8.0"
 
 [features]
 default = []
-prover = ["dep:prover"]
-prover_v2 = ["dep:prover_v2"]
-
-gpu = ["dep:plonky2", "prover/gpu"]
+gpu = ["prover_v2/gpu"]
