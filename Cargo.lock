@@ -6581,6 +6581,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "tracing",
  "zkm-core-executor",
  "zkm-core-machine",

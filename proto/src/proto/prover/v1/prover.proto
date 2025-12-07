@@ -91,8 +91,8 @@ message ProveRequest {
   string proof_id = 1;
   string computed_request_id = 2;
   string program_id = 3;
-  string segment = 4;
-  //  bytes segment = 4;
+  // Inline compressed segment bytes, replacing the previous file path usage.
+  bytes segment_inline = 4;
   optional uint64 block_no = 5;
   uint32 seg_size = 6;
   string elf_path = 7;

@@ -5,13 +5,16 @@ use crate::proto::stage_service;
 use crate::prover_client;
 use crate::stage::{
     stage::get_timestamp,
-    stage::Stage,
+    stage::{SplitMeta, Stage},
     tasks::{Task, TASK_ITYPE_FINAL, TASK_ITYPE_SPLIT, TASK_STATE_FAILED, TASK_STATE_SUCCESS},
     GenerateTask,
 };
 use crate::TlsConfig;
 use anyhow::Context;
 use common::file;
+use prover_v2::contexts::SplitContext;
+use prover_v2::executor::Executor;
+use prover_v2::SplitItem;
 // use std::collections::HashMap;
 use std::sync::Arc;
 // use std::sync::Mutex;
@@ -173,21 +176,43 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                 let mut interval = time::interval(time::Duration::from_millis(200));
                 let max_prover_num = stage.generate_task.max_prover_num;
                 let cur_prover_num = Arc::new(tokio::sync::Mutex::new(0u32));
+                let mut split_started = false;
+                let mut split_rx: Option<mpsc::Receiver<SplitItem>> = None;
+                let mut split_handle: Option<tokio::task::JoinHandle<()>> = None;
                 loop {
                     let current_step = stage.step;
                     match stage.step {
                         Step::Prove => {
-                            // Dispatch split tasks.
-                            if let Some(task_payload) = stage.get_split_task() {
-                                dispatch_task(
-                                    task_payload,
-                                    prover_client::split,
-                                    Task::Split,
-                                    tx.clone(),
-                                    tls_config.clone(),
-                                    cur_prover_num.clone(),
-                                    max_prover_num,
-                                );
+                            if !split_started {
+                                if let Some(_task_payload) = stage.get_split_task() {
+                                    split_started = true;
+                                    let (split_tx_async, rx_tmp_async) =
+                                        mpsc::channel::<SplitItem>(256);
+                                    split_rx = Some(rx_tmp_async);
+                                    let split_ctx = SplitContext::new(
+                                        &stage.generate_task.base_dir,
+                                        &stage.generate_task.program_id,
+                                        &stage.generate_task.elf_path,
+                                        stage.generate_task.block_no,
+                                        stage.generate_task.seg_size,
+                                        &stage.generate_task.seg_path,
+                                        &stage.generate_task.public_input_path,
+                                        &stage.generate_task.private_input_path,
+                                        &stage.generate_task.output_stream_path,
+                                        &stage.split_task.args,
+                                        &stage.generate_task.receipt_inputs_path,
+                                    );
+                                    let split_handle_tmp = tokio::task::spawn_blocking(move || {
+                                        let executor = Executor::default();
+                                        if let Err(e) =
+                                            executor.split_streaming(&split_ctx, split_tx_async.clone())
+                                        {
+                                            let _ = split_tx_async
+                                                .blocking_send(SplitItem::Error(e.to_string()));
+                                        }
+                                    });
+                                    split_handle = Some(split_handle_tmp);
+                                }
                             }
 
                             // Dispatch prove tasks until the concurrent prover limit is reached.
@@ -246,7 +271,81 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                         _ => {}
                     }
 
+                    let split_fut = async {
+                        if let Some(rx) = split_rx.as_mut() {
+                            rx.recv().await
+                        } else {
+                            None
+                        }
+                    };
+                    let split_handle_fut = async {
+                        if let Some(handle) = split_handle.as_mut() {
+                            if handle.is_finished() {
+                                Some(handle.await)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+
                     tokio::select! {
+                        split_res = split_fut => {
+                            if let Some(item) = split_res {
+                                match item {
+                                    SplitItem::Segment { index, compressed } => {
+                                        stage.push_split_segment(index, compressed);
+                                    }
+                                    SplitItem::DeferredProof { index, bytes } => {
+                                        stage.push_split_deferred(index, bytes);
+                                    }
+                                    SplitItem::Meta {
+                                        total_steps,
+                                        total_segments,
+                                        vk_bytes,
+                                        public_values_stream,
+                                    } => {
+                                        let mut split_task = stage.split_task.clone();
+                                        split_task.total_steps = total_steps;
+                                        split_task.total_segments = total_segments;
+                                        split_task.state = TASK_STATE_SUCCESS;
+                                        split_task.trace.finish_ts = get_timestamp();
+                                        stage.apply_split_meta(SplitMeta {
+                                            total_steps,
+                                            total_segments,
+                                            vk_bytes,
+                                            public_values_stream,
+                                        });
+                                        stage.split_task = split_task.clone();
+                                        save_task!(split_task, db, TASK_ITYPE_SPLIT);
+                                    }
+                                    SplitItem::Error(msg) => {
+                                        stage.is_error = true;
+                                        let mut split_task = stage.split_task.clone();
+                                        split_task.state = TASK_STATE_FAILED;
+                                        split_task.trace.finish_ts = get_timestamp();
+                                        split_task.output = msg.into_bytes();
+                                        stage.split_task = split_task.clone();
+                                        save_task!(split_task, db, TASK_ITYPE_SPLIT);
+                                    }
+                                }
+                            }
+                        },
+                        split_join = split_handle_fut => {
+                            if let Some(Err(join_err)) = split_join {
+                                stage.is_error = true;
+                                let mut split_task = stage.split_task.clone();
+                                split_task.state = TASK_STATE_FAILED;
+                                split_task.trace.finish_ts = get_timestamp();
+                                split_task.output = format!("split task panic: {join_err}").into_bytes();
+                                stage.split_task = split_task.clone();
+                                save_task!(split_task, db, TASK_ITYPE_SPLIT);
+                                split_handle = None;
+                            } else if split_join.is_some() {
+                                split_handle = None;
+                            }
+                        },
                         task = rx.recv() => {
                             if let Some(task) = task {
                                 match task {

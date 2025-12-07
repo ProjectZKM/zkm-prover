@@ -247,7 +247,7 @@ pub async fn prove(
             proof_id: prove_task.program.proof_id.clone(),
             computed_request_id: prove_task.task_id.clone(),
             program_id: prove_task.program_id.clone(),
-            segment: prove_task.segment.clone(),
+            segment_inline: prove_task.segment_bytes.clone(),
             block_no: prove_task.program.block_no,
             seg_size: prove_task.program.seg_size,
             elf_path: prove_task.program.elf_path.clone(),

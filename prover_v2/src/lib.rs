@@ -86,6 +86,28 @@ pub enum Segment {
     Record(Box<ExecutionRecord>),
 }
 
+#[derive(Debug)]
+pub enum SplitItem {
+    Segment {
+        index: usize,
+        compressed: Vec<u8>,
+    },
+    DeferredProof {
+        index: usize,
+        bytes: Vec<u8>,
+    },
+    Meta {
+        total_steps: u64,
+        total_segments: u32,
+        vk_bytes: Vec<u8>,
+        public_values_stream: Vec<u8>,
+    },
+    Error(String),
+}
+
+pub type SplitSender = tokio::sync::mpsc::Sender<SplitItem>;
+pub type SplitReceiver = tokio::sync::mpsc::Receiver<SplitItem>;
+
 #[cfg(feature = "gpu")]
 type ProverComponents = zkm_gpu_prover::components::GpuProverComponents;
 #[cfg(not(feature = "gpu"))]

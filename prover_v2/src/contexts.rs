@@ -53,9 +53,7 @@ pub struct ProveContext {
     pub program_id: String,
     pub index: usize,
     pub elf_path: String,
-    // execution record
-    // pub segment: Vec<u8>,
-    pub segment: String,
+    pub segment: Vec<u8>,
     pub seg_size: u32,
     // pub receipts_input: Vec<Vec<u8>>,
 }

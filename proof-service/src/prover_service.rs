@@ -199,7 +199,7 @@ impl ProverService for ProverServiceSVC {
             let prove_context = ProveContext::new(
                 request.get_ref().block_no,
                 request.get_ref().seg_size,
-                &request.get_ref().segment,
+                "",
                 &request.get_ref().receipts_input,
             );
             #[cfg(feature = "prover_v2")]
@@ -208,7 +208,7 @@ impl ProverService for ProverServiceSVC {
                 program_id: request.get_ref().program_id.clone(),
                 index: request.get_ref().index as usize,
                 elf_path: request.get_ref().elf_path.clone(),
-                segment: request.get_ref().segment.clone(),
+                segment: request.get_ref().segment_inline.clone(),
                 seg_size: request.get_ref().seg_size,
             };
 

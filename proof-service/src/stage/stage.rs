@@ -6,6 +6,7 @@ use crate::stage::tasks::{
     SplitTask, Trace, TASK_STATE_FAILED, TASK_STATE_INITIAL, TASK_STATE_PROCESSING,
     TASK_STATE_SUCCESS, TASK_STATE_UNPROCESSED,
 };
+use std::collections::VecDeque;
 use rayon::prelude::*;
 use std::{
     fmt::{Debug, Formatter},
@@ -25,10 +26,21 @@ pub struct Stage {
     pub prove_tasks: Vec<ProveTask>,
     pub agg_tasks: Vec<AggTask>,
     pub snark_task: SnarkTask,
+    pub split_meta: Option<SplitMeta>,
+    pub pending_segments: VecDeque<(usize, Vec<u8>)>,
+    pub pending_deferred: VecDeque<(usize, Vec<u8>)>,
     pub is_error: bool,
     pub errmsg: String,
     pub step: Step,
     pub is_tasks_gen_done: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SplitMeta {
+    pub total_steps: u64,
+    pub total_segments: u32,
+    pub vk_bytes: Vec<u8>,
+    pub public_values_stream: Vec<u8>,
 }
 
 macro_rules! on_task {
@@ -70,18 +82,7 @@ macro_rules! on_prove_task {
                 $dst.output = $src.output.clone();
             }
             if TASK_STATE_FAILED == $src.state {
-                // If the task is failed, we increase the failure count.
-                // If the failure count reaches 3, we mark the stage as error.
-                if $dst.failure_count < 3 {
-                    tracing::warn!(
-                        "[prove] {}:{} failed, try again...",
-                        $src.proof_id,
-                        $src.task_id
-                    );
-                    $dst.failure_count += 1;
-                } else {
-                    $stage.is_error = true;
-                }
+                $stage.is_error = true;
             }
         }
     };
@@ -108,6 +109,9 @@ impl Stage {
             prove_tasks: Vec::new(),
             agg_tasks: Vec::new(),
             snark_task: SnarkTask::default(),
+            split_meta: None,
+            pending_segments: VecDeque::new(),
+            pending_deferred: VecDeque::new(),
             is_error: false,
             errmsg: "".to_string(),
             is_tasks_gen_done: false,
@@ -123,12 +127,20 @@ impl Stage {
             Step::Prove => {
                 self.gen_prove_task();
                 tracing::debug!("generate {} tasks", self.prove_tasks.len());
-                if self.split_task.state == TASK_STATE_SUCCESS && !self.is_tasks_gen_done {
+                self.gen_prove_task_post();
+
+                if self.split_task.state == TASK_STATE_SUCCESS
+                    && !self.is_tasks_gen_done
+                    && self
+                        .split_meta
+                        .as_ref()
+                        .map(|m| self.prove_tasks.len() >= m.total_segments as usize)
+                        .unwrap_or(false)
+                {
                     if self.generate_task.target_step == Step::Split {
                         self.step = Step::End;
                         return;
                     } else {
-                        self.gen_prove_task_post();
                         crate::metrics::SEGMENTS_GAUGE.set(self.prove_tasks.len() as f64);
                         tracing::info!(
                             "Split done. Generate {} prove_tasks",
@@ -138,7 +150,6 @@ impl Stage {
                             self.gen_agg_tasks();
                         }
                         self.is_tasks_gen_done = true;
-                        // clear agg tasks' child task
                         let successful_task_ids = self
                             .prove_tasks
                             .iter()
@@ -246,101 +257,60 @@ impl Stage {
         on_task!(split_task, dst, self);
     }
 
-    fn task_with_no(&self, file_no: usize) -> ProveTask {
-        ProveTask {
-            task_id: uuid::Uuid::new_v4().to_string(),
-            program_id: self.generate_task.program_id.clone(),
-            proof_id: self.generate_task.proof_id.clone(),
-            state: TASK_STATE_UNPROCESSED,
-            trace: Trace::default(),
-            base_dir: self.generate_task.base_dir.clone(),
-            file_no,
-            is_deferred: false,
-            segment: format!("{}/{file_no}", self.generate_task.seg_path),
-            program: self.generate_task.gen_program(),
-            // will be assigned after the root proving
-            output: vec![],
-            failure_count: 0,
-        }
+    pub fn push_split_segment(&mut self, index: usize, compressed: Vec<u8>) {
+        self.pending_segments.push_back((index, compressed));
+    }
+
+    pub fn push_split_deferred(&mut self, index: usize, bytes: Vec<u8>) {
+        self.pending_deferred.push_back((index, bytes));
+    }
+
+    pub fn apply_split_meta(&mut self, meta: SplitMeta) {
+        self.split_meta = Some(meta.clone());
+        self.split_task.total_steps = meta.total_steps;
+        self.split_task.total_segments = meta.total_segments;
     }
 
     fn gen_prove_task(&mut self) {
         if self.generate_task.target_step == Step::Split || self.is_tasks_gen_done {
             return;
         }
-        // Pre-allocate 64 tasks
-        if self.prove_tasks.is_empty() {
-            self.prove_tasks = (0..16)
-                .into_par_iter()
-                .map(|i| self.task_with_no(i))
-                .collect();
-        }
-        let file_numbers: usize = match std::fs::read_to_string(format!(
-            "{}/segments.txt",
-            self.generate_task.seg_path
-        )) {
-            Ok(content) => match content.trim().parse() {
-                Ok(n) => n,
-                Err(_) => return,
-            },
-            Err(_) => return,
-        };
-
-        // generate prove tasks
-        for file_no in self.prove_tasks.len()..file_numbers {
-            let task = self.task_with_no(file_no);
+        while let Some((file_no, bytes)) = self.pending_segments.pop_front() {
+            let task = ProveTask {
+                task_id: uuid::Uuid::new_v4().to_string(),
+                program_id: self.generate_task.program_id.clone(),
+                proof_id: self.generate_task.proof_id.clone(),
+                state: TASK_STATE_UNPROCESSED,
+                trace: Trace::default(),
+                base_dir: self.generate_task.base_dir.clone(),
+                file_no,
+                is_deferred: false,
+                segment_bytes: bytes,
+                program: self.generate_task.gen_program(),
+                output: vec![],
+                ..Default::default()
+            };
             self.prove_tasks.push(task);
-            tracing::debug!("insert {file_no}");
         }
+        self.prove_tasks.sort_by_key(|t| t.file_no);
     }
 
     fn gen_prove_task_post(&mut self) {
-        // ensure all the prove tasks are generated
-        {
-            if self.prove_tasks.len() > self.split_task.total_segments as usize {
-                self.prove_tasks
-                    .truncate(self.split_task.total_segments as usize)
-            } else {
-                let missing_tasks = (self.prove_tasks.len()
-                    ..self.split_task.total_segments as usize)
-                    .into_par_iter()
-                    .map(|i| self.task_with_no(i))
-                    .collect::<Vec<_>>();
-                self.prove_tasks.extend_from_slice(&missing_tasks);
-            }
+        while let Some((file_no, bytes)) = self.pending_deferred.pop_front() {
+            let prove_task = ProveTask {
+                task_id: uuid::Uuid::new_v4().to_string(),
+                proof_id: self.generate_task.proof_id.clone(),
+                state: TASK_STATE_SUCCESS,
+                base_dir: self.generate_task.base_dir.clone(),
+                file_no,
+                is_deferred: true,
+                program: self.generate_task.gen_program(),
+                output: bytes,
+                ..Default::default()
+            };
+            self.prove_tasks.push(prove_task);
         }
-
-        #[cfg(feature = "prover_v2")]
-        {
-            let files = common::file::new(&self.generate_task.seg_path)
-                .read_dir()
-                .unwrap();
-            let mut deferred_files: Vec<(usize, String)> = Vec::new();
-            for file_name in files {
-                if let Some(name) = file_name.strip_prefix("deferred_proof_") {
-                    if let Ok(num) = name.parse::<usize>() {
-                        deferred_files.push((num, file_name));
-                    }
-                }
-            }
-            deferred_files.sort_by_key(|(n, _)| *n);
-            tracing::info!("Generate {} deferred proofs", deferred_files.len());
-
-            for (file_no, file_name) in deferred_files.into_iter() {
-                let prove_task = ProveTask {
-                    task_id: uuid::Uuid::new_v4().to_string(),
-                    proof_id: self.generate_task.proof_id.clone(),
-                    state: TASK_STATE_SUCCESS,
-                    base_dir: self.generate_task.base_dir.clone(),
-                    file_no,
-                    is_deferred: true,
-                    program: self.generate_task.gen_program(),
-                    output: safe_read(&format!("{}/{file_name}", self.generate_task.seg_path)),
-                    ..Default::default()
-                };
-                self.prove_tasks.push(prove_task);
-            }
-        }
+        self.prove_tasks.sort_by_key(|t| t.file_no);
 
         #[cfg(feature = "prover")]
         if self.prove_tasks.len() < 2 {
@@ -355,9 +325,6 @@ impl Stage {
     pub fn get_prove_task(&mut self) -> Option<ProveTask> {
         for prove_task in self.prove_tasks.iter_mut() {
             if prove_task.state == TASK_STATE_UNPROCESSED || prove_task.state == TASK_STATE_FAILED {
-                if !std::path::Path::new(&prove_task.segment).exists() {
-                    continue;
-                }
                 prove_task.state = TASK_STATE_PROCESSING;
                 prove_task.trace.start_ts = get_timestamp();
                 return Some(prove_task.clone());
@@ -376,6 +343,8 @@ impl Stage {
         // clear agg‘s child task
         if prove_task.state == TASK_STATE_SUCCESS {
             self.clear_agg_child_task(&prove_task.task_id);
+        } else if prove_task.state == TASK_STATE_FAILED {
+            self.is_error = true;
         }
     }
 
