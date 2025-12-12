@@ -6388,6 +6388,7 @@ dependencies = [
  "common",
  "env_logger 0.10.2",
  "ethers",
+ "futures",
  "hex",
  "hyper 0.14.32",
  "lazy_static",

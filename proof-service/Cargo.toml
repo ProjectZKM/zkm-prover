@@ -37,6 +37,7 @@ prometheus = "0.13"
 hyper = { version = "^0.14", features = ["server", "http1", "tcp"] }
 rand = "0.8"
 sha2 = "0.10.9"
+futures = "0.3"
 
 # file server
 warp = "0.3"

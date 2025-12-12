@@ -12,6 +12,7 @@ use crate::stage::{
 use crate::TlsConfig;
 use anyhow::Context;
 use common::file;
+use futures::future::pending;
 use prover_v2::contexts::SplitContext;
 use prover_v2::executor::Executor;
 use prover_v2::SplitItem;
@@ -32,8 +33,13 @@ macro_rules! save_task {
                 $type,
                 $task.state
             );
-            // TODO: should remove the content from database, store it by FS.
-            let content = serde_json::to_string(&$task).unwrap();
+            let content = match serde_json::to_string(&$task) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!("serialize task {:?} failed: {:?}", $task.task_id, e);
+                    return;
+                }
+            };
             let prove_task = database::ProveTask {
                 id: $task.task_id,
                 itype: $type,
@@ -139,8 +145,253 @@ async fn run_single_node_task(
     finalize_stage_task(task, &stage, task_start_time, result, db).await;
 }
 
+async fn handle_split_item(stage: &mut Stage, item: SplitItem, db: &Database) {
+    match item {
+        SplitItem::Segment { index, compressed } => {
+            stage.push_split_segment(index, compressed);
+        }
+        SplitItem::DeferredProof { index, bytes } => {
+            stage.push_split_deferred(index, bytes);
+        }
+        SplitItem::Meta {
+            total_steps,
+            total_segments,
+            vk_bytes,
+            public_values_stream,
+        } => {
+            let mut split_task = stage.split_task.clone();
+            split_task.total_steps = total_steps;
+            split_task.total_segments = total_segments;
+            split_task.state = TASK_STATE_SUCCESS;
+            split_task.trace.finish_ts = get_timestamp();
+            stage.apply_split_meta(SplitMeta {
+                total_steps,
+                total_segments,
+                vk_bytes,
+                public_values_stream,
+            });
+            stage.split_task = split_task.clone();
+            save_task!(split_task, db, TASK_ITYPE_SPLIT);
+        }
+        SplitItem::Error(msg) => {
+            stage.is_error = true;
+            let mut split_task = stage.split_task.clone();
+            split_task.state = TASK_STATE_FAILED;
+            split_task.trace.finish_ts = get_timestamp();
+            split_task.output = msg.into_bytes();
+            stage.split_task = split_task.clone();
+            save_task!(split_task, db, TASK_ITYPE_SPLIT);
+        }
+    }
+}
+
+async fn handle_task_result(stage: &mut Stage, task: Task, db: &Database) {
+    match task {
+        Task::Split(mut data) => {
+            stage.on_split_task(&mut data);
+            save_task!(data, db, TASK_ITYPE_SPLIT);
+        }
+        Task::Prove(mut data) => {
+            stage.on_prove_task(&mut data);
+        }
+        Task::Agg(mut data) => {
+            stage.on_agg_task(&mut data);
+        }
+        Task::Snark(mut data) => {
+            stage.on_snark_task(&mut data);
+            save_task!(data, db, TASK_ITYPE_FINAL);
+        }
+    };
+}
+
+async fn handle_split_panic(stage: &mut Stage, err: tokio::task::JoinError, db: &Database) {
+    stage.is_error = true;
+    let mut split_task = stage.split_task.clone();
+    split_task.state = TASK_STATE_FAILED;
+    split_task.trace.finish_ts = get_timestamp();
+    split_task.output = format!("split task panic: {err}").into_bytes();
+    stage.split_task = split_task.clone();
+    save_task!(split_task, db, TASK_ITYPE_SPLIT);
+}
+
+async fn run_distributed_task(
+    mut task: StageTask,
+    mut stage: Stage,
+    tls_config: Option<TlsConfig>,
+    db: Database,
+    task_start_time: std::time::Instant,
+) {
+    let mut check_at = get_timestamp();
+    let (tx, mut rx) = mpsc::channel(128);
+    stage.dispatch();
+
+    // update db, record the latest status and step
+    let _ = db
+        .update_stage_task_check_at(&task.id, task.check_at as u64, check_at, stage.step.into())
+        .await;
+    task.check_at = check_at as i64;
+    check_at = get_timestamp();
+
+    let mut interval = time::interval(time::Duration::from_secs(1));
+    let max_prover_num = stage.generate_task.max_prover_num;
+    let cur_prover_num = Arc::new(tokio::sync::Mutex::new(0u32));
+    let mut split_started = false;
+    let mut split_rx: Option<mpsc::Receiver<SplitItem>> = None;
+    let mut split_handle: Option<tokio::task::JoinHandle<()>> = None;
+
+    loop {
+        let current_step = stage.step;
+        if matches!(stage.step, Step::Prove) && !split_started {
+            if let Some(_task_payload) = stage.get_split_task() {
+                split_started = true;
+                let (split_tx_async, rx_tmp_async) = mpsc::channel::<SplitItem>(256);
+                split_rx = Some(rx_tmp_async);
+                let split_ctx = SplitContext::new(
+                    &stage.generate_task.base_dir,
+                    &stage.generate_task.program_id,
+                    &stage.generate_task.elf_path,
+                    stage.generate_task.block_no,
+                    stage.generate_task.seg_size,
+                    &stage.generate_task.seg_path,
+                    &stage.generate_task.public_input_path,
+                    &stage.generate_task.private_input_path,
+                    &stage.generate_task.output_stream_path,
+                    &stage.split_task.args,
+                    &stage.generate_task.receipt_inputs_path,
+                );
+                let split_handle_tmp = tokio::task::spawn_blocking(move || {
+                    let executor = Executor::default();
+                    if let Err(e) = executor.split_streaming(&split_ctx, split_tx_async.clone()) {
+                        let _ = split_tx_async.blocking_send(SplitItem::Error(e.to_string()));
+                    }
+                });
+                split_handle = Some(split_handle_tmp);
+            }
+        }
+
+        // Dispatch prove/agg/snark tasks
+        if matches!(stage.step, Step::Prove) {
+            while stage.count_processing_prove_tasks() < max_prover_num as usize {
+                if let Some(task_payload) = stage.get_prove_task() {
+                    dispatch_task(
+                        task_payload,
+                        prover_client::prove,
+                        Task::Prove,
+                        tx.clone(),
+                        tls_config.clone(),
+                        cur_prover_num.clone(),
+                        max_prover_num,
+                    );
+                } else {
+                    break;
+                }
+            }
+
+            while stage.is_tasks_gen_done
+                && stage.count_unfinished_prove_tasks() < max_prover_num as usize
+            {
+                if let Some(task_payload) = stage.get_agg_task() {
+                    tracing::debug!("get_agg_task: true");
+                    dispatch_task(
+                        task_payload,
+                        prover_client::aggregate,
+                        Task::Agg,
+                        tx.clone(),
+                        tls_config.clone(),
+                        cur_prover_num.clone(),
+                        max_prover_num,
+                    );
+                } else {
+                    break;
+                }
+            }
+        } else if matches!(stage.step, Step::Snark) {
+            if let Some(task_payload) = stage.get_snark_task() {
+                dispatch_task(
+                    task_payload,
+                    prover_client::snark_proof,
+                    Task::Snark,
+                    tx.clone(),
+                    tls_config.clone(),
+                    cur_prover_num.clone(),
+                    max_prover_num,
+                );
+            }
+        }
+
+        let split_fut = async {
+            if let Some(rx) = split_rx.as_mut() {
+                rx.recv().await
+            } else {
+                pending().await
+            }
+        };
+        let split_handle_fut = async {
+            if let Some(handle) = split_handle.as_mut() {
+                Some(handle.await)
+            } else {
+                pending().await
+            }
+        };
+
+        tokio::select! {
+            split_res = split_fut => {
+                if let Some(item) = split_res {
+                    handle_split_item(&mut stage, item, &db).await;
+                }
+            },
+            split_join = split_handle_fut => {
+                if let Some(join_res) = split_join {
+                    if let Err(err) = join_res {
+                        handle_split_panic(&mut stage, err, &db).await;
+                    }
+                    split_handle = None;
+                }
+            },
+            task = rx.recv() => {
+                if let Some(task) = task {
+                    handle_task_result(&mut stage, task, &db).await;
+                }
+            },
+            _ = interval.tick() => {}
+        }
+
+        if stage.is_success() || stage.is_error() {
+            break;
+        }
+        stage.dispatch();
+
+        let ts_now = get_timestamp();
+        if check_at + 10 < ts_now || current_step != stage.step {
+            check_at = ts_now;
+            let rows_affected = db
+                .update_stage_task_check_at(
+                    &task.id,
+                    task.check_at as u64,
+                    check_at,
+                    stage.step.into(),
+                )
+                .await;
+            if let Ok(rows_affected) = rows_affected {
+                if rows_affected == 1 {
+                    task.check_at = check_at as i64;
+                }
+            }
+        }
+    }
+
+    let result = if stage.is_success() && stage.generate_task.target_step == Step::Snark {
+        file::new(&stage.generate_task.snark_path)
+            .read()
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+    finalize_stage_task(&task, &stage, task_start_time, result, &db).await;
+}
+
 #[instrument(level = "info", skip_all, fields(proof_id = %task.id))]
-async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: Database) {
+async fn run_stage_task(task: StageTask, tls_config: Option<TlsConfig>, db: Database) {
     info!("Running stage task");
     if let Some(ref context) = task.context {
         let task_decoded = serde_json::from_str::<GenerateTask>(&context);
@@ -156,253 +407,7 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                     return;
                 }
 
-                // Distributed (multi-node) handler
-                let mut check_at = get_timestamp();
-                let (tx, mut rx) = mpsc::channel(128);
-                stage.dispatch();
-
-                // update db, record the latest status and step
-                let _ = db
-                    .update_stage_task_check_at(
-                        &task.id,
-                        task.check_at as u64,
-                        check_at,
-                        stage.step.into(),
-                    )
-                    .await;
-                task.check_at = check_at as i64;
-                check_at = get_timestamp();
-
-                let mut interval = time::interval(time::Duration::from_millis(200));
-                let max_prover_num = stage.generate_task.max_prover_num;
-                let cur_prover_num = Arc::new(tokio::sync::Mutex::new(0u32));
-                let mut split_started = false;
-                let mut split_rx: Option<mpsc::Receiver<SplitItem>> = None;
-                let mut split_handle: Option<tokio::task::JoinHandle<()>> = None;
-                loop {
-                    let current_step = stage.step;
-                    match stage.step {
-                        Step::Prove => {
-                            if !split_started {
-                                if let Some(_task_payload) = stage.get_split_task() {
-                                    split_started = true;
-                                    let (split_tx_async, rx_tmp_async) =
-                                        mpsc::channel::<SplitItem>(256);
-                                    split_rx = Some(rx_tmp_async);
-                                    let split_ctx = SplitContext::new(
-                                        &stage.generate_task.base_dir,
-                                        &stage.generate_task.program_id,
-                                        &stage.generate_task.elf_path,
-                                        stage.generate_task.block_no,
-                                        stage.generate_task.seg_size,
-                                        &stage.generate_task.seg_path,
-                                        &stage.generate_task.public_input_path,
-                                        &stage.generate_task.private_input_path,
-                                        &stage.generate_task.output_stream_path,
-                                        &stage.split_task.args,
-                                        &stage.generate_task.receipt_inputs_path,
-                                    );
-                                    let split_handle_tmp = tokio::task::spawn_blocking(move || {
-                                        let executor = Executor::default();
-                                        if let Err(e) =
-                                            executor.split_streaming(&split_ctx, split_tx_async.clone())
-                                        {
-                                            let _ = split_tx_async
-                                                .blocking_send(SplitItem::Error(e.to_string()));
-                                        }
-                                    });
-                                    split_handle = Some(split_handle_tmp);
-                                }
-                            }
-
-                            // Dispatch prove tasks until the concurrent prover limit is reached.
-                            while stage.count_processing_prove_tasks() < max_prover_num as usize {
-                                if let Some(task_payload) = stage.get_prove_task() {
-                                    dispatch_task(
-                                        task_payload,
-                                        prover_client::prove,
-                                        Task::Prove,
-                                        tx.clone(),
-                                        tls_config.clone(),
-                                        cur_prover_num.clone(),
-                                        max_prover_num,
-                                    );
-                                } else {
-                                    // No more prove tasks available, break the inner loop.
-                                    break;
-                                }
-                            }
-
-                            // Dispatch aggregate tasks if conditions are met.
-                            while stage.is_tasks_gen_done
-                                && stage.count_unfinished_prove_tasks() < max_prover_num as usize
-                            {
-                                if let Some(task_payload) = stage.get_agg_task() {
-                                    tracing::debug!("get_agg_task: true");
-                                    dispatch_task(
-                                        task_payload,
-                                        prover_client::aggregate,
-                                        Task::Agg,
-                                        tx.clone(),
-                                        tls_config.clone(),
-                                        cur_prover_num.clone(),
-                                        max_prover_num,
-                                    );
-                                } else {
-                                    // No more aggregation tasks available, break the inner loop.
-                                    tracing::debug!("get_agg_task: false");
-                                    break;
-                                }
-                            }
-                        }
-                        Step::Snark => {
-                            if let Some(task_payload) = stage.get_snark_task() {
-                                dispatch_task(
-                                    task_payload,
-                                    prover_client::snark_proof,
-                                    Task::Snark,
-                                    tx.clone(),
-                                    tls_config.clone(),
-                                    cur_prover_num.clone(),
-                                    max_prover_num,
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    let split_fut = async {
-                        if let Some(rx) = split_rx.as_mut() {
-                            rx.recv().await
-                        } else {
-                            None
-                        }
-                    };
-                    let split_handle_fut = async {
-                        if let Some(handle) = split_handle.as_mut() {
-                            if handle.is_finished() {
-                                Some(handle.await)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    };
-
-                    tokio::select! {
-                        split_res = split_fut => {
-                            if let Some(item) = split_res {
-                                match item {
-                                    SplitItem::Segment { index, compressed } => {
-                                        stage.push_split_segment(index, compressed);
-                                    }
-                                    SplitItem::DeferredProof { index, bytes } => {
-                                        stage.push_split_deferred(index, bytes);
-                                    }
-                                    SplitItem::Meta {
-                                        total_steps,
-                                        total_segments,
-                                        vk_bytes,
-                                        public_values_stream,
-                                    } => {
-                                        let mut split_task = stage.split_task.clone();
-                                        split_task.total_steps = total_steps;
-                                        split_task.total_segments = total_segments;
-                                        split_task.state = TASK_STATE_SUCCESS;
-                                        split_task.trace.finish_ts = get_timestamp();
-                                        stage.apply_split_meta(SplitMeta {
-                                            total_steps,
-                                            total_segments,
-                                            vk_bytes,
-                                            public_values_stream,
-                                        });
-                                        stage.split_task = split_task.clone();
-                                        save_task!(split_task, db, TASK_ITYPE_SPLIT);
-                                    }
-                                    SplitItem::Error(msg) => {
-                                        stage.is_error = true;
-                                        let mut split_task = stage.split_task.clone();
-                                        split_task.state = TASK_STATE_FAILED;
-                                        split_task.trace.finish_ts = get_timestamp();
-                                        split_task.output = msg.into_bytes();
-                                        stage.split_task = split_task.clone();
-                                        save_task!(split_task, db, TASK_ITYPE_SPLIT);
-                                    }
-                                }
-                            }
-                        },
-                        split_join = split_handle_fut => {
-                            if let Some(Err(join_err)) = split_join {
-                                stage.is_error = true;
-                                let mut split_task = stage.split_task.clone();
-                                split_task.state = TASK_STATE_FAILED;
-                                split_task.trace.finish_ts = get_timestamp();
-                                split_task.output = format!("split task panic: {join_err}").into_bytes();
-                                stage.split_task = split_task.clone();
-                                save_task!(split_task, db, TASK_ITYPE_SPLIT);
-                                split_handle = None;
-                            } else if split_join.is_some() {
-                                split_handle = None;
-                            }
-                        },
-                        task = rx.recv() => {
-                            if let Some(task) = task {
-                                match task {
-                                    Task::Split(mut data) => {
-                                        stage.on_split_task(&mut data);
-                                        save_task!(data, db, TASK_ITYPE_SPLIT);
-                                    },
-                                    Task::Prove(mut data) => {
-                                        stage.on_prove_task(&mut data);
-                                        // save_task!(data, db, TASK_ITYPE_PROVE);
-                                    },
-                                    Task::Agg(mut data) => {
-                                        stage.on_agg_task(&mut data);
-                                        // save_task!(data, db, TASK_ITYPE_AGG);
-                                    },
-                                    Task::Snark(mut data) => {
-                                        stage.on_snark_task(&mut data);
-                                        save_task!(data, db, TASK_ITYPE_FINAL);
-                                    },
-                                };
-                            }
-                        },
-                        _ = interval.tick() => {
-                        }
-                    }
-                    if stage.is_success() || stage.is_error() {
-                        break;
-                    }
-                    stage.dispatch();
-
-                    let ts_now = get_timestamp();
-                    if check_at + 10 < ts_now || current_step != stage.step {
-                        check_at = ts_now;
-                        let rows_affected = db
-                            .update_stage_task_check_at(
-                                &task.id,
-                                task.check_at as u64,
-                                check_at,
-                                stage.step.into(),
-                            )
-                            .await;
-                        if let Ok(rows_affected) = rows_affected {
-                            if rows_affected == 1 {
-                                task.check_at = check_at as i64;
-                            }
-                        }
-                    }
-                }
-
-                let result = if stage.is_success() && generate_context.target_step == Step::Snark {
-                    file::new(&generate_context.snark_path)
-                        .read()
-                        .unwrap_or_default()
-                } else {
-                    vec![]
-                };
-                finalize_stage_task(&task, &stage, task_start_time, result, &db).await;
+                run_distributed_task(task, stage, tls_config, db, task_start_time).await;
             }
             Err(_) => {
                 let _ = db
@@ -454,7 +459,7 @@ async fn finalize_stage_task(
             error!("Failed to update stage task check_at on success: {:?}", e);
         }
 
-        let result_str = String::from_utf8(result).expect("Invalid UTF-8 bytes in proof result");
+        let result_str = String::from_utf8_lossy(&result).to_string();
         if let Err(e) = db
             .update_stage_task(
                 &task.id,
