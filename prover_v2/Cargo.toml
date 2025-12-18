@@ -15,8 +15,8 @@ tokio = { version = "1.48.0", features = ["sync"] }
 lru = "0.14.0"
 parking_lot = "0.12"
 
-zkm-core-machine = { git = "https://github.com/ProjectZKM/Ziren" }
-zkm-core-executor = { git = "https://github.com/ProjectZKM/Ziren" }
+zkm-core-machine = { git = "https://github.com/ProjectZKM/Ziren", features = ["stats"] }
+zkm-core-executor = { git = "https://github.com/ProjectZKM/Ziren", features = ["stats"] }
 zkm-stark = { git = "https://github.com/ProjectZKM/Ziren" }
 zkm-prover = { git = "https://github.com/ProjectZKM/Ziren" }
 zkm-recursion-compiler = { git = "https://github.com/ProjectZKM/Ziren" }

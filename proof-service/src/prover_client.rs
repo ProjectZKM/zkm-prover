@@ -252,7 +252,7 @@ pub async fn prove(
             seg_size: prove_task.program.seg_size,
             elf_path: prove_task.program.elf_path.clone(),
             receipts_input: prove_task.program.receipts.clone(),
-            index: prove_task.file_no as u32,
+            index: prove_task.record_index,
         };
         tracing::info!(
             "[prove] rpc {} {}:{}:{} start",

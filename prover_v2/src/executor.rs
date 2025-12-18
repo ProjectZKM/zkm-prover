@@ -1,7 +1,7 @@
 use common::file;
 use std::borrow::Borrow;
 use std::fs::File;
-use std::io::{self, Seek, Write};
+use std::io::{self, Read, Seek, Write};
 use std::sync::{
     mpsc::sync_channel,
     {Arc, Mutex},
@@ -28,7 +28,7 @@ use zkm_stark::{
 
 pub use crate::contexts::SplitContext;
 use crate::{
-    get_prover, NetworkProve, ProverComponents, Segment, StateWithPublicValues,
+    get_prover, CheckpointPacket, NetworkProve, ProverComponents, Segment, StateWithPublicValues,
     FIRST_LAYER_BATCH_SIZE, KEY_CACHE, PROGRAM_CACHE,
 };
 
@@ -161,17 +161,16 @@ impl Executor {
         file::new(&format!("{}/vk.bin", ctx.base_dir)).write_all(&vk_bytes)?;
 
         let context = network_prove.context_builder.build();
-        let (total_steps, total_segments, public_values_stream) = self.split_streaming_with_context(
-            &prover,
-            ctx,
-            program,
-            vk,
-            &network_prove.stdin,
-            network_prove.opts.core_opts,
-            context,
-            prover.core_shape_config.as_ref(),
-            &tx,
-        )?;
+        let (total_steps, total_segments, public_values_stream) = self
+            .split_streaming_with_context(
+                &prover,
+                program,
+                &network_prove.stdin,
+                network_prove.opts.core_opts,
+                context,
+                prover.core_shape_config.as_ref(),
+                &tx,
+            )?;
         let public_values_path = format!("{}/wrap/public_values.bin", ctx.base_dir);
         file::new(&public_values_path).write_all(&public_values_stream)?;
 
@@ -458,7 +457,6 @@ impl Executor {
             }
             // Wait until the checkpoint generator handle has fully finished.
             let public_values_stream = checkpoint_generator_handle.join().unwrap().unwrap();
-            // file::new(&ctx.public_input_path).write(&public_values_stream)?;                    // write public_values_stream
 
             // Wait until the records and traces have been fully generated for phase 2.
             p2_record_and_trace_gen_handles
@@ -519,9 +517,7 @@ impl Executor {
     pub fn split_streaming_with_context<'a>(
         &self,
         prover: &'a ZKMProver<ProverComponents>,
-        ctx: &SplitContext,
         program: &Program,
-        vk: &StarkVerifyingKey<CoreSC>,
         stdin: &ZKMStdin,
         opts: ZKMCoreOpts,
         mut context: ZKMContext<'a>,
@@ -542,281 +538,61 @@ impl Executor {
             runtime.write_proof(proof, vk);
         }
 
+        if !stdin.proofs.is_empty() {
+            return Err(anyhow::anyhow!(
+                "deferred proofs are not supported in prover_v2 split_streaming yet"
+            ));
+        }
+
         let split_start = Instant::now();
-        let span = tracing::Span::current().clone();
-        std::thread::scope(move |s| {
+        let mut checkpoint_index: usize = 0;
+        loop {
+            let span = tracing::debug_span!("batch", checkpoint_index);
             let _span = span.enter();
 
-            let checkpoint_generator_span = tracing::Span::current().clone();
-            let (checkpoints_tx, checkpoints_rx) =
-                sync_channel::<(usize, File, bool)>(opts.checkpoints_channel_capacity);
-            let checkpoint_generator_handle: ScopedJoinHandle<Result<_, ZKMCoreProverError>> = s
-                .spawn(move || {
-                    let _span = checkpoint_generator_span.enter();
-                    tracing::debug_span!("checkpoint generator").in_scope(|| {
-                        let mut index = 0;
+            let (checkpoint, done) = runtime
+                .execute_state(false)
+                .map_err(|e| anyhow::anyhow!("execute_state failed: {}", e))?;
 
-                        loop {
-                            let span = tracing::debug_span!("batch");
-                            let _span = span.enter();
+            let start_shard_count = checkpoint.total_shard_count;
+            let end_shard_count = runtime.state.total_shard_count;
 
-                            let (checkpoint, done) = runtime
-                                .execute_state(false)
-                                .map_err(ZKMCoreProverError::ExecutionError)?;
+            let checkpoint_bytes = bincode::serialize(&checkpoint)
+                .map_err(|e| anyhow::anyhow!("serialize checkpoint failed: {e}"))?;
+            tracing::info!("Checkpoint size: {} bytes", checkpoint_bytes.len());
 
-                            let serialized = bincode::serialize(&checkpoint)
-                                .expect("Failed to serialize checkpoint");
-                            tracing::info!("Checkpoint size: {} bytes", serialized.len());
-
-                            let mut checkpoint_file =
-                                tempfile::tempfile().map_err(ZKMCoreProverError::IoError)?;
-                            checkpoint
-                                .save(&mut checkpoint_file)
-                                .map_err(ZKMCoreProverError::IoError)?;
-
-                            checkpoints_tx.send((index, checkpoint_file, done)).unwrap();
-
-                            if done {
-                                break Ok(runtime.state.public_values_stream);
-                            }
-
-                            index += 1;
-                        }
-                    })
-                });
-
-            let p2_record_gen_sync = Arc::new(TurnBasedSync::new());
-            let checkpoints_rx = Arc::new(Mutex::new(checkpoints_rx));
-            let segment_index = Arc::new(Mutex::new(0));
-
-            let report_aggregate = Arc::new(Mutex::new(ExecutionReport::default()));
-            let state = Arc::new(Mutex::new(PublicValues::<u32, u32>::default().reset()));
-            let deferred = Arc::new(Mutex::new(ExecutionRecord::new(program.clone().into())));
-            let mut p2_record_and_trace_gen_handles = Vec::new();
-            for _ in 0..opts.trace_gen_workers {
-                let record_gen_sync = Arc::clone(&p2_record_gen_sync);
-                let checkpoints_rx = Arc::clone(&checkpoints_rx);
-                let segment_index = Arc::clone(&segment_index);
-
-                let report_aggregate = Arc::clone(&report_aggregate);
-                let state = Arc::clone(&state);
-                let deferred = Arc::clone(&deferred);
-                let program = program.clone();
-
-                let span = tracing::Span::current().clone();
-
-                let tx = tx.clone();
-                let vk = vk.clone();
-                let handle = s.spawn(move || {
-                    let _span = span.enter();
-                    tracing::debug_span!("phase 2 trace generation").in_scope(|| {
-                        loop {
-                            let received = { checkpoints_rx.lock().unwrap().recv() };
-                            if let Ok((index, mut checkpoint, done)) = received {
-                                let now = Instant::now();
-                                let mut reader = std::io::BufReader::new(&checkpoint);
-                                let exe_state: ExecutionState =
-                                    bincode::deserialize_from(&mut reader)
-                                        .expect("failed to deserialize state");
-                                let (mut records, report) =
-                                    tracing::debug_span!("trace checkpoint").in_scope(|| {
-                                        trace_checkpoint::<CoreSC>(
-                                            program.clone(),
-                                            exe_state.clone(),
-                                            opts,
-                                            shape_config,
-                                        )
-                                    });
-                                tracing::info!(
-                                    "generated {} records in {:?}",
-                                    records.len(),
-                                    now.elapsed()
-                                );
-                                debug_assert_eq!(records.len(), 1);
-                                *report_aggregate.lock().unwrap() += report;
-                                checkpoint
-                                    .seek(io::SeekFrom::Start(0))
-                                    .expect("failed to seek to start of tempfile");
-
-                                record_gen_sync.wait_for_turn(index);
-
-                                let mut state = state.lock().unwrap();
-                                for record in records.iter_mut() {
-                                    state.shard += 1;
-                                    state.execution_shard = record.public_values.execution_shard;
-                                    state.start_pc = record.public_values.start_pc;
-                                    state.next_pc = record.public_values.next_pc;
-                                    state.committed_value_digest =
-                                        record.public_values.committed_value_digest;
-                                    state.deferred_proofs_digest =
-                                        record.public_values.deferred_proofs_digest;
-                                    record.public_values = *state;
-                                }
-
-                                let mut deferred = deferred.lock().unwrap();
-                                for record in records.iter_mut() {
-                                    deferred.append(&mut record.defer());
-                                }
-
-                                let mut deferred = deferred.split(done, None, opts.split_opts);
-                                tracing::info!("deferred {} records", deferred.len());
-
-                                if !done {
-                                    state.execution_shard += 1;
-                                }
-                                for record in deferred.iter_mut() {
-                                    state.shard += 1;
-                                    state.previous_init_addr_bits =
-                                        record.public_values.previous_init_addr_bits;
-                                    state.last_init_addr_bits =
-                                        record.public_values.last_init_addr_bits;
-                                    state.previous_finalize_addr_bits =
-                                        record.public_values.previous_finalize_addr_bits;
-                                    state.last_finalize_addr_bits =
-                                        record.public_values.last_finalize_addr_bits;
-                                    state.start_pc = state.next_pc;
-                                    record.public_values = *state;
-                                }
-
-                                let mut segment_index = segment_index.lock().unwrap();
-                                let base_index = *segment_index;
-                                *segment_index += records.len() + deferred.len();
-
-                                record_gen_sync.advance_turn();
-
-                                let segments: Vec<_> = std::iter::once(Segment::State(Box::new(
-                                    StateWithPublicValues {
-                                        state: exe_state,
-                                        public_values: records[0].public_values,
-                                    },
-                                )))
-                                .chain(deferred.into_iter().map(|r| Segment::Record(Box::new(r))))
-                                .collect();
-
-                                for (i, segment) in segments.iter().enumerate() {
-                                    let now = Instant::now();
-                                    let encoded_segment = bincode::serialize(segment).unwrap();
-                                    let compressed_segment =
-                                        zstd::stream::encode_all(&*encoded_segment, 2)
-                                            .expect("zstd compress failed");
-                                    if tx
-                                        .blocking_send(crate::SplitItem::Segment {
-                                            index: base_index + i,
-                                            compressed: compressed_segment,
-                                        })
-                                        .is_err()
-                                    {
-                                        return;
-                                    }
-
-                                    tracing::info!(
-                                        "Sent record {} in {:?}",
-                                        base_index + i,
-                                        now.elapsed()
-                                    );
-                                }
-
-                                if done && !stdin.proofs.is_empty() {
-                                    let last_pv = if segments.len() == 1 {
-                                        Some(records.last().unwrap().public_values())
-                                    } else {
-                                        match segments.last().unwrap() {
-                                            Segment::Record(record) => {
-                                                Some(record.public_values())
-                                            }
-                                            _ => None,
-                                        }
-                                    };
-                                    let last_proof_pv = last_pv
-                                        .as_ref()
-                                        .map(|pv| pv.as_slice().borrow())
-                                        .unwrap();
-                                    let deferred_proofs = stdin
-                                        .proofs
-                                        .iter()
-                                        .map(|(reduce_proof, _)| reduce_proof.clone())
-                                        .collect::<Vec<_>>();
-                                    let deferred_inputs = prover.get_recursion_deferred_inputs(
-                                        &vk,
-                                        last_proof_pv,
-                                        &deferred_proofs,
-                                        FIRST_LAYER_BATCH_SIZE,
-                                    );
-
-                                    for (i, deferred_input) in deferred_inputs.into_iter().enumerate()
-                                    {
-                                        let encoded_proof =
-                                            bincode::serialize(&deferred_input).unwrap();
-                                        if tx
-                                            .blocking_send(crate::SplitItem::DeferredProof {
-                                                index: (1 << 16) | i,
-                                                bytes: encoded_proof,
-                                            })
-                                            .is_err()
-                                        {
-                                            return;
-                                        }
-                                    }
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                    })
-                });
-                p2_record_and_trace_gen_handles.push(handle);
-            }
-
-            let public_values_stream = checkpoint_generator_handle.join().unwrap().unwrap();
-
-            p2_record_and_trace_gen_handles
-                .into_iter()
-                .for_each(|handle| handle.join().unwrap());
-            let total_segments = {
-                let segment_index = segment_index.lock().unwrap();
-                *segment_index
+            let packet = CheckpointPacket {
+                checkpoint: checkpoint_bytes,
+                done,
+                start_shard_count,
+                end_shard_count,
             };
+            let packet_bytes = bincode::serialize(&packet)
+                .map_err(|e| anyhow::anyhow!("serialize checkpoint packet failed: {e}"))?;
+            tx.blocking_send(crate::SplitItem::Checkpoint {
+                bytes: packet_bytes,
+            })
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-            let report_aggregate = report_aggregate.lock().unwrap();
-            tracing::info!(
-                "execution report (totals): total_cycles={}, total_syscall_cycles={}, touched_memory_addresses={}",
-                report_aggregate.total_instruction_count(),
-                report_aggregate.total_syscall_count(),
-                report_aggregate.touched_memory_addresses,
-            );
-
-            tracing::info!("execution report (opcode counts):");
-            let (width, lines) = sorted_table_lines(report_aggregate.opcode_counts.as_ref());
-            for (label, count) in lines {
-                if *count > 0 {
-                    tracing::info!("  {}", format_table_line(&width, &label, count));
-                } else {
-                    tracing::debug!("  {}", format_table_line(&width, &label, count));
-                }
+            if done {
+                break;
             }
+            checkpoint_index += 1;
+        }
 
-            tracing::info!("execution report (syscall counts):");
-            let (width, lines) = sorted_table_lines(report_aggregate.syscall_counts.as_ref());
-            for (label, count) in lines {
-                if *count > 0 {
-                    tracing::info!("  {}", format_table_line(&width, &label, count));
-                } else {
-                    tracing::debug!("  {}", format_table_line(&width, &label, count));
-                }
-            }
+        let public_values_stream = runtime.state.public_values_stream;
+        let cycles = runtime.report.total_instruction_count();
+        let total_segments = runtime.state.total_shard_count;
 
-            let cycles = report_aggregate.total_instruction_count();
+        let split_time = split_start.elapsed().as_secs_f64();
+        tracing::info!(
+            "summary: cycles={}, executor={}s, khz={:.2}",
+            cycles,
+            split_time,
+            cycles as f64 / (split_time * 1000.0),
+        );
 
-            let split_time = split_start.elapsed().as_secs_f64();
-            tracing::info!(
-                "summary: cycles={}, executor={}s, khz={:.2}",
-                cycles,
-                split_time,
-                cycles as f64 / (split_time * 1000.0),
-            );
-
-            Ok((cycles, total_segments as u32, public_values_stream))
-        })
+        Ok((cycles, total_segments, public_values_stream))
     }
 }
 

@@ -11,6 +11,7 @@ pub struct ProveTask {
     pub base_dir: String,
 
     pub file_no: usize,
+    pub record_index: u32,
     pub is_deferred: bool,
 
     #[serde(skip_serializing, skip_deserializing)]

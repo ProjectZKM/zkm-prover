@@ -1,9 +1,9 @@
 use crate::contexts::ProveContext;
-use crate::{get_prover, NetworkProve, Segment, KEY_CACHE, PROGRAM_CACHE};
+use crate::{get_prover, CheckpointPacket, NetworkProve, KEY_CACHE, PROGRAM_CACHE};
 use common::file;
 use zkm_core_machine::utils::trace_checkpoint;
 use zkm_prover::CoreSC;
-use zkm_stark::{MachineProver, MachineProvingKey, StarkGenericConfig};
+use zkm_stark::{MachineProver, MachineProvingKey, MachineRecord, StarkGenericConfig};
 
 #[derive(Default)]
 pub struct RootProver {}
@@ -11,49 +11,63 @@ pub struct RootProver {}
 impl RootProver {
     pub fn prove(&self, ctx: &ProveContext) -> anyhow::Result<Vec<u8>> {
         let now = std::time::Instant::now();
-        let segment: Segment = {
-            let decoded = zstd::stream::decode_all(&*ctx.segment)
-                .map_err(|e| anyhow::anyhow!("zstd decode failed: {e}"))?;
-            bincode::deserialize::<Segment>(&decoded)
-                .map_err(|e| anyhow::anyhow!("deserialize failed: {e}"))?
-        };
-        tracing::info!("read segment time: {:?}", now.elapsed());
+        let checkpoint_packet = bincode::deserialize::<CheckpointPacket>(&ctx.segment)
+            .map_err(|e| anyhow::anyhow!("deserialize checkpoint packet failed: {e}"))?;
+        tracing::info!("read checkpoint packet time: {:?}", now.elapsed());
 
         let network_prove = NetworkProve::new(ctx.seg_size);
         let opts = network_prove.opts.core_opts;
         let prover = get_prover();
 
-        let mut record = match segment {
-            Segment::State(state) => {
-                let mut program_cache = PROGRAM_CACHE.lock();
-                let program = if let Some(program) = program_cache.cache.get(&ctx.program_id) {
-                    tracing::info!("load program from cache");
-                    program
-                } else {
-                    tracing::info!("No program in cache, generate new program");
-                    let elf = file::new(&ctx.elf_path).read()?;
-                    let program = prover
-                        .get_program(&elf)
-                        .map_err(|e| anyhow::Error::msg(e.to_string()))?;
-                    program_cache.push(ctx.program_id.clone(), program);
-                    program_cache.cache.get(&ctx.program_id).unwrap()
-                };
-                let public_values = state.public_values;
-                let (records, _) = tracing::debug_span!("trace checkpoint").in_scope(|| {
-                    trace_checkpoint::<CoreSC>(
-                        program.clone(),
-                        state.state,
-                        opts,
-                        prover.core_shape_config.as_ref(),
-                    )
-                });
-                let mut record = records.into_iter().next().unwrap();
-                let _ = record.defer();
-                record.public_values = public_values;
-                record
-            }
-            Segment::Record(record) => *record,
+        let mut program_cache = PROGRAM_CACHE.lock();
+        let program = if let Some(program) = program_cache.cache.get(&ctx.program_id) {
+            tracing::info!("load program from cache");
+            program
+        } else {
+            tracing::info!("No program in cache, generate new program");
+            let elf = file::new(&ctx.elf_path).read()?;
+            let program = prover
+                .get_program(&elf)
+                .map_err(|e| anyhow::Error::msg(e.to_string()))?;
+            program_cache.push(ctx.program_id.clone(), program);
+            program_cache.cache.get(&ctx.program_id).unwrap()
         };
+
+        let checkpoint_state = bincode::deserialize::<zkm_core_executor::ExecutionState>(
+            &checkpoint_packet.checkpoint,
+        )
+        .map_err(|e| anyhow::anyhow!("deserialize checkpoint failed: {e}"))?;
+
+        let now = std::time::Instant::now();
+        let (mut records, _) = tracing::debug_span!("trace checkpoint").in_scope(|| {
+            trace_checkpoint::<CoreSC>(
+                program.clone(),
+                checkpoint_state,
+                opts,
+                prover.core_shape_config.as_ref(),
+            )
+        });
+        tracing::info!("trace checkpoint time: {:?}", now.elapsed());
+
+        let expected_record_count = checkpoint_packet.record_count() as usize;
+        let mut deferred = zkm_core_executor::ExecutionRecord::new(program.clone().into());
+        for record in records.iter_mut() {
+            deferred.append(&mut record.defer());
+        }
+        let mut deferred_records = deferred.split(checkpoint_packet.done, None, opts.split_opts);
+        records.append(&mut deferred_records);
+
+        if records.len() != expected_record_count {
+            return Err(anyhow::anyhow!(
+                "record count mismatch: expected={}, actual={}",
+                expected_record_count,
+                records.len()
+            ));
+        }
+        let mut record = records
+            .into_iter()
+            .nth(ctx.index)
+            .ok_or_else(|| anyhow::anyhow!("record index out of bounds: {}", ctx.index))?;
 
         let now = std::time::Instant::now();
         let mut cache = KEY_CACHE.lock();

@@ -29,6 +29,7 @@ pub struct Stage {
     pub split_meta: Option<SplitMeta>,
     pub pending_segments: VecDeque<(usize, Vec<u8>)>,
     pub pending_deferred: VecDeque<(usize, Vec<u8>)>,
+    pub pending_checkpoints: VecDeque<Vec<u8>>,
     pub is_error: bool,
     pub errmsg: String,
     pub step: Step,
@@ -112,6 +113,7 @@ impl Stage {
             split_meta: None,
             pending_segments: VecDeque::new(),
             pending_deferred: VecDeque::new(),
+            pending_checkpoints: VecDeque::new(),
             is_error: false,
             errmsg: "".to_string(),
             is_tasks_gen_done: false,
@@ -265,6 +267,10 @@ impl Stage {
         self.pending_deferred.push_back((index, bytes));
     }
 
+    pub fn push_split_checkpoint(&mut self, bytes: Vec<u8>) {
+        self.pending_checkpoints.push_back(bytes);
+    }
+
     pub fn apply_split_meta(&mut self, meta: SplitMeta) {
         self.split_meta = Some(meta.clone());
         self.split_task.total_steps = meta.total_steps;
@@ -292,6 +298,41 @@ impl Stage {
             };
             self.prove_tasks.push(task);
         }
+
+        // prover_v2: generate prove tasks from checkpoints.
+        while let Some(bytes) = self.pending_checkpoints.pop_front() {
+            let packet = match bincode::deserialize::<prover_v2::CheckpointPacket>(&bytes) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.is_error = true;
+                    self.errmsg = format!("deserialize checkpoint packet failed: {e}");
+                    break;
+                }
+            };
+            let record_count = packet
+                .end_shard_count
+                .checked_sub(packet.start_shard_count)
+                .unwrap_or(0);
+            for i in 0..record_count {
+                let file_no = (packet.start_shard_count + i) as usize;
+                let task = ProveTask {
+                    task_id: uuid::Uuid::new_v4().to_string(),
+                    program_id: self.generate_task.program_id.clone(),
+                    proof_id: self.generate_task.proof_id.clone(),
+                    state: TASK_STATE_UNPROCESSED,
+                    trace: Trace::default(),
+                    base_dir: self.generate_task.base_dir.clone(),
+                    file_no,
+                    record_index: i,
+                    is_deferred: false,
+                    segment_bytes: bytes.clone(),
+                    program: self.generate_task.gen_program(),
+                    output: vec![],
+                    ..Default::default()
+                };
+                self.prove_tasks.push(task);
+            }
+        }
         self.prove_tasks.sort_by_key(|t| t.file_no);
     }
 
@@ -303,6 +344,7 @@ impl Stage {
                 state: TASK_STATE_SUCCESS,
                 base_dir: self.generate_task.base_dir.clone(),
                 file_no,
+                record_index: 0,
                 is_deferred: true,
                 program: self.generate_task.gen_program(),
                 output: bytes,

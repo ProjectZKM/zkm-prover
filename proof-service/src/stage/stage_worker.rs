@@ -150,6 +150,9 @@ async fn handle_split_item(stage: &mut Stage, item: SplitItem, db: &Database) {
         SplitItem::Segment { index, compressed } => {
             stage.push_split_segment(index, compressed);
         }
+        SplitItem::Checkpoint { bytes } => {
+            stage.push_split_checkpoint(bytes);
+        }
         SplitItem::DeferredProof { index, bytes } => {
             stage.push_split_deferred(index, bytes);
         }
@@ -232,7 +235,7 @@ async fn run_distributed_task(
     task.check_at = check_at as i64;
     check_at = get_timestamp();
 
-    let mut interval = time::interval(time::Duration::from_secs(1));
+    let mut interval = time::interval(time::Duration::from_millis(50));
     let max_prover_num = stage.generate_task.max_prover_num;
     let cur_prover_num = Arc::new(tokio::sync::Mutex::new(0u32));
     let mut split_started = false;
@@ -399,7 +402,7 @@ async fn run_stage_task(task: StageTask, tls_config: Option<TlsConfig>, db: Data
             Ok(generate_context) => {
                 let task_start_time = std::time::Instant::now();
 
-                let mut stage = Stage::new(generate_context.clone());
+                let stage = Stage::new(generate_context.clone());
 
                 // single node handler.
                 if generate_context.single_node {

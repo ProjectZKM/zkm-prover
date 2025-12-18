@@ -31,6 +31,22 @@ pub mod single_node_prover;
 
 pub const FIRST_LAYER_BATCH_SIZE: usize = 1;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointPacket {
+    pub checkpoint: Vec<u8>,
+    pub done: bool,
+    pub start_shard_count: u32,
+    pub end_shard_count: u32,
+}
+
+impl CheckpointPacket {
+    pub fn record_count(&self) -> u32 {
+        self.end_shard_count
+            .checked_sub(self.start_shard_count)
+            .unwrap_or(0)
+    }
+}
+
 pub struct NetworkProve<'a> {
     pub context_builder: ZKMContextBuilder<'a>,
     pub stdin: ZKMStdin,
@@ -91,6 +107,9 @@ pub enum SplitItem {
     Segment {
         index: usize,
         compressed: Vec<u8>,
+    },
+    Checkpoint {
+        bytes: Vec<u8>,
     },
     DeferredProof {
         index: usize,
