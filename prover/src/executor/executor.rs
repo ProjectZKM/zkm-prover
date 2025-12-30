@@ -12,9 +12,9 @@ use crate::executor::SplitContext;
 impl Executor {
     pub fn split(&self, ctx: &SplitContext) -> Result<(u64, u32), String> {
         // 1. split ELF into segs
-        let elf_path = ctx.elf_path.clone();
+        let elf_path = ctx.elf_path.as_str();
         let block_no = ctx.block_no.unwrap_or(0);
-        let seg_path = ctx.seg_path.clone();
+        let seg_path = ctx.seg_path.as_str();
         let seg_size = ctx.seg_size.to_usize().expect("u32->usize failed");
         let mut args: Vec<&str> = ctx.args.split_whitespace().collect();
         if args.len() > 2 {
@@ -22,7 +22,7 @@ impl Executor {
         }
 
         log::info!("split {} load elf file", elf_path);
-        let data = file::new(&elf_path).read();
+        let data = file::new(elf_path).read();
         let mut block_path = get_block_path(&ctx.base_dir, &block_no.to_string(), "");
         let input_path = if block_path.ends_with('/') {
             format!("{}input", block_path)
@@ -43,8 +43,9 @@ impl Executor {
                         let data = file::new(&ctx.public_input_path)
                             .read()
                             .expect("read public_input_stream failed");
-                        state.input_stream.push(data.clone());
-                        log::info!("split set public_input data {}", data.len());
+                        let len = data.len();
+                        state.input_stream.push(data);
+                        log::info!("split set public_input data {}", len);
                     }
 
                     // private_input_stream
@@ -53,8 +54,9 @@ impl Executor {
                         let data = file::new(&ctx.private_input_path)
                             .read()
                             .expect("read private_input_stream failed");
-                        state.input_stream.push(data.clone());
-                        log::info!("split set private_input data {}", data.len());
+                        let len = data.len();
+                        state.input_stream.push(data);
+                        log::info!("split set private_input data {}", len);
                     }
 
                     if !ctx.receipt_inputs_path.is_empty() {
@@ -63,8 +65,8 @@ impl Executor {
                             .expect("read receipt_inputs_stream failed");
                         let receipt_inputs = bincode::deserialize::<Vec<Vec<u8>>>(&data)
                             .expect("deserialize receipt_inputs_stream failed");
-                        for receipt_input in receipt_inputs.iter() {
-                            state.input_stream.push(receipt_input.clone());
+                        for receipt_input in receipt_inputs {
+                            state.input_stream.push(receipt_input);
                             log::info!("split set receipt_inputs data {}", data.len());
                         }
                     }
@@ -81,10 +83,9 @@ impl Executor {
                     }
 
                     let mut instrumented_state = InstrumentedState::new(state, block_path);
-                    let seg_path_clone = seg_path.clone();
-                    file::new(&seg_path_clone).create_dir_all().unwrap();
+                    file::new(seg_path).create_dir_all().unwrap();
                     let new_write = |_: &str| -> Option<std::fs::File> { None };
-                    instrumented_state.split_segment(false, &seg_path_clone, new_write);
+                    instrumented_state.split_segment(false, seg_path, new_write);
 
                     let new_write =
                         |name: &str| -> Option<Box<dyn std::io::Write>> { Some(file::new(name)) };
@@ -100,11 +101,11 @@ impl Executor {
                             seg_size as u64
                         };
                         if cycles >= split_seg_size {
-                            instrumented_state.split_segment(true, &seg_path_clone, new_write);
+                            instrumented_state.split_segment(true, seg_path, new_write);
                             loop_index += 1;
                         }
                     }
-                    instrumented_state.split_segment(true, &seg_path_clone, new_write);
+                    instrumented_state.split_segment(true, seg_path, new_write);
                     log::info!(
                         "Split done {} : {}",
                         instrumented_state.state.total_step,
