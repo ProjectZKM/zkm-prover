@@ -1,12 +1,12 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use crate::proto::includes::v1::ProverVersion;
 use crate::proto::prover_service::v1::{
-    get_status_response, prover_service_server::ProverService, AggregateRequest, AggregateResponse,
-    GetStatusRequest, GetStatusResponse, GetTaskResultRequest, GetTaskResultResponse, ProveRequest,
-    ProveResponse, Result, ResultCode, SingleNodeRequest, SingleNodeResponse, SnarkProofRequest,
+    prover_service_server::ProverService, AggregateRequest, AggregateResponse, GetStatusRequest,
+    GetStatusResponse, GetTaskResultRequest, GetTaskResultResponse, ProveRequest, ProveResponse,
+    Result, ResultCode, SingleNodeRequest, SingleNodeResponse, SnarkProofRequest,
     SnarkProofResponse, SplitElfRequest, SplitElfResponse,
 };
 use crate::{config, metrics};

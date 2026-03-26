@@ -22,6 +22,7 @@ pub struct GenerateTask {
     pub target_step: Step,
     pub from_step: Step,
     pub single_node: bool,
+    /// Control whether to execute the aggregation phase; skip Agg when set to true.
     pub composite_proof: bool,
     pub receipt_inputs_path: String,
     pub receipts_path: String,

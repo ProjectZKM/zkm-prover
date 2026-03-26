@@ -210,6 +210,7 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
 
                             // Dispatch aggregate tasks if conditions are met.
                             while stage.is_tasks_gen_done
+                                // Agg should not grab resources while there are still many proof tasks pending.
                                 && stage.count_unfinished_prove_tasks() < max_prover_num as usize
                             {
                                 if let Some(task_payload) = stage.get_agg_task() {
@@ -275,8 +276,11 @@ async fn run_stage_task(mut task: StageTask, tls_config: Option<TlsConfig>, db: 
                     if stage.is_success() || stage.is_error() {
                         break;
                     }
+
+                    // Let the state machine consume the new results and prepare for the next step.
                     stage.dispatch();
 
+                    // This allows other workers to see that the task is still actively held.
                     let ts_now = get_timestamp();
                     if check_at + 10 < ts_now || current_step != stage.step {
                         check_at = ts_now;

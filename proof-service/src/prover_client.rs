@@ -175,7 +175,6 @@ pub async fn split(
             *status = NodeStatus::Idle;
             if let Some(response_result) = response.get_ref().result.as_ref() {
                 split_task.state = result_code_to_state(response_result.code);
-                // FIXME: node_info usage?
                 split_task.trace.node_info = addrs.clone();
                 split_task.total_steps = response.get_ref().total_steps;
                 split_task.total_segments = response.get_ref().total_segments;

@@ -28,6 +28,7 @@ pub struct Stage {
     pub is_error: bool,
     pub errmsg: String,
     pub step: Step,
+    /// A flag indicating whether prove and aggregation tasks​ have been generated.
     pub is_tasks_gen_done: bool,
 }
 
@@ -134,10 +135,13 @@ impl Stage {
                             "Split done. Generate {} prove_tasks",
                             self.prove_tasks.len()
                         );
+
                         if !self.generate_task.composite_proof {
                             self.gen_agg_tasks();
                         }
+
                         self.is_tasks_gen_done = true;
+
                         // clear agg tasks' child task
                         let successful_task_ids = self
                             .prove_tasks
@@ -275,6 +279,7 @@ impl Stage {
                 .map(|i| self.task_with_no(i))
                 .collect();
         }
+
         let file_numbers: usize = match std::fs::read_to_string(format!(
             "{}/segments.txt",
             self.generate_task.seg_path
@@ -286,7 +291,7 @@ impl Stage {
             Err(_) => return,
         };
 
-        // generate prove tasks
+        // Generate proof tasks as needed, based on​ the number of segments.
         for file_no in self.prove_tasks.len()..file_numbers {
             let task = self.task_with_no(file_no);
             self.prove_tasks.push(task);
@@ -488,8 +493,11 @@ impl Stage {
             result.push(agg_task);
             agg_index += 1;
         }
+
+        // The leaf layer.
         self.agg_tasks.append(&mut result.clone());
 
+        // Process non-leaf layers layer by layer.
         let mut current_length = result.len();
         while current_length > 1 {
             let mut new_result = Vec::new();
