@@ -1,24 +1,17 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use crate::proto::includes::v1::ProverVersion;
 use crate::proto::prover_service::v1::{
-    get_status_response, prover_service_server::ProverService, AggregateRequest, AggregateResponse,
-    GetStatusRequest, GetStatusResponse, GetTaskResultRequest, GetTaskResultResponse, ProveRequest,
-    ProveResponse, Result, ResultCode, SnarkProofRequest, SnarkProofResponse, SplitElfRequest,
-    SplitElfResponse,
+    prover_service_server::ProverService, AggregateRequest, AggregateResponse, GetStatusRequest,
+    GetStatusResponse, GetTaskResultRequest, GetTaskResultResponse, ProveRequest, ProveResponse,
+    Result, ResultCode, SingleNodeRequest, SingleNodeResponse, SnarkProofRequest,
+    SnarkProofResponse, SplitElfRequest, SplitElfResponse,
 };
 use crate::{config, metrics};
-#[cfg(feature = "prover")]
-use prover::{
-    contexts::{AggContext, ProveContext, SnarkContext},
-    executor::SplitContext,
-    pipeline::Pipeline,
-};
-#[cfg(feature = "prover_v2")]
 use prover_v2::{
-    contexts::{AggContext, ProveContext, SnarkContext, SplitContext},
+    contexts::{AggContext, ProveContext, SingleNodeContext, SnarkContext, SplitContext},
     pipeline::Pipeline,
 };
 
@@ -54,24 +47,15 @@ async fn run_back_task<
 #[derive(Default)]
 pub struct ProverServiceSVC {
     pub config: config::RuntimeConfig,
-    #[cfg(feature = "prover")]
-    pipeline: Arc<Mutex<Pipeline>>,
-    #[cfg(feature = "prover_v2")]
-    pipeline: Arc<Mutex<Pipeline>>,
+    pipeline: Arc<Pipeline>,
 }
 impl ProverServiceSVC {
     pub fn new(config: config::RuntimeConfig) -> Self {
-        let version = if cfg!(feature = "prover") {
-            ProverVersion::Zkm
-        } else if cfg!(feature = "prover_v2") {
-            ProverVersion::Zkm2
-        } else {
-            panic!("Not supported prover version");
-        };
-        let pipeline = Arc::new(Mutex::new(Pipeline::new(
+        let version = ProverVersion::Zkm2;
+        let pipeline = Arc::new(Pipeline::new(
             &config.base_dir,
             &config.get_proving_key_path(version.into()),
-        )));
+        ));
         Self { config, pipeline }
     }
 }
@@ -110,14 +94,7 @@ impl ProverService for ProverServiceSVC {
     ) -> tonic::Result<Response<GetStatusResponse>, Status> {
         metrics::record_metrics("prover::get_status", || async {
             // tracing::info!("{:#?}", request);
-            let mut response = GetStatusResponse::default();
-            let success = self.pipeline.lock().unwrap().get_status();
-            tracing::info!("node {:?}: lock pipeline {:?}", self.config.addr, success);
-            if success {
-                response.status = get_status_response::Status::Idle.into();
-            } else {
-                response.status = get_status_response::Status::Computing.into();
-            }
+            let response = GetStatusResponse::default();
             Ok(Response::new(response))
         })
         .await
@@ -161,16 +138,9 @@ impl ProverService for ProverServiceSVC {
             );
 
             let pipeline = self.pipeline.clone();
-            let split_func = move || {
-                // todo: use try_lock?
-                let guard = pipeline.lock().unwrap_or_else(|e| {
-                    tracing::error!("Mutex poisoned, recovering");
-                    e.into_inner()
-                });
-
-                guard.split(&split_context)
-            };
+            let split_func = move || pipeline.split(&split_context);
             let result = run_back_task(split_func).await;
+
             let mut response = SplitElfResponse {
                 proof_id: request.get_ref().proof_id.clone(),
                 computed_request_id: request.get_ref().computed_request_id.clone(),
@@ -212,14 +182,6 @@ impl ProverService for ProverServiceSVC {
                 //request.get_ref().seg_path,
             );
             let start = Instant::now();
-            #[cfg(feature = "prover")]
-            let prove_context = ProveContext::new(
-                request.get_ref().block_no,
-                request.get_ref().seg_size,
-                &request.get_ref().segment,
-                &request.get_ref().receipts_input,
-            );
-            #[cfg(feature = "prover_v2")]
             let prove_context = ProveContext {
                 proof_id: request.get_ref().proof_id.clone(),
                 program_id: request.get_ref().program_id.clone(),
@@ -227,19 +189,13 @@ impl ProverService for ProverServiceSVC {
                 elf_path: request.get_ref().elf_path.clone(),
                 segment: request.get_ref().segment.clone(),
                 seg_size: request.get_ref().seg_size,
+                ..Default::default()
             };
 
             let pipeline = self.pipeline.clone();
-            // todo: lock the pipeline
-            let prove_func = move || {
-                let guard = pipeline.lock().unwrap_or_else(|e| {
-                    tracing::error!("Mutex poisoned, recovering");
-                    e.into_inner()
-                });
-
-                guard.prove_root(&prove_context)
-            };
+            let prove_func = move || pipeline.prove_root(&prove_context);
             let result = run_back_task(prove_func).await;
+
             let mut response = ProveResponse {
                 proof_id: request.get_ref().proof_id.clone(),
                 computed_request_id: request.get_ref().computed_request_id.clone(),
@@ -276,19 +232,6 @@ impl ProverService for ProverServiceSVC {
                 request.get_ref().inputs.len()
             );
             let start = Instant::now();
-            #[cfg(feature = "prover")]
-            let agg_context = {
-                let inputs = request.get_ref().inputs.clone();
-                AggContext::new(
-                    request.get_ref().seg_size,
-                    &inputs[0].receipt_input,
-                    &inputs[1].receipt_input,
-                    inputs[0].is_agg,
-                    inputs[1].is_agg,
-                    request.get_ref().is_final,
-                )
-            };
-            #[cfg(feature = "prover_v2")]
             let agg_context = AggContext {
                 vk: request.get_ref().vk.clone(),
                 proofs: request
@@ -304,14 +247,9 @@ impl ProverService for ProverServiceSVC {
             };
 
             let pipeline = self.pipeline.clone();
-            let agg_func = move || {
-                let ppl = pipeline.lock().unwrap_or_else(|e| {
-                    tracing::error!("Mutex poisoned, recovering");
-                    e.into_inner()
-                });
-                ppl.prove_aggregate(&agg_context)
-            };
+            let agg_func = move || pipeline.prove_aggregate(&agg_context);
             let result = run_back_task(agg_func).await;
+
             let mut response = AggregateResponse {
                 proof_id: request.get_ref().proof_id.clone(),
                 computed_request_id: request.get_ref().computed_request_id.clone(),
@@ -353,17 +291,13 @@ impl ProverService for ProverServiceSVC {
                 proof_id: request.get_ref().proof_id.clone(),
                 // proving_key_path: self.config.get_proving_key_path(request.get_ref().version),
                 agg_receipt: request.get_ref().agg_receipt.clone(),
+                from_input: request.get_ref().from_input,
             };
 
             let pipeline = self.pipeline.clone();
-            let snark_func = move || {
-                let guard = pipeline.lock().unwrap_or_else(|e| {
-                    tracing::error!("Mutex poisoned, recovering");
-                    e.into_inner()
-                });
-                guard.prove_snark(&snark_context)
-            };
+            let snark_func = move || pipeline.prove_snark(&snark_context);
             let result = run_back_task(snark_func).await;
+
             let mut response = SnarkProofResponse {
                 proof_id: request.get_ref().proof_id.clone(),
                 computed_request_id: request.get_ref().computed_request_id.clone(),
@@ -378,6 +312,70 @@ impl ProverService for ProverServiceSVC {
             let elapsed = end.duration_since(start);
             tracing::info!(
                 "[snark_proof] {}:{} code:{} elapsed:{} end",
+                request.get_ref().proof_id,
+                request.get_ref().computed_request_id,
+                response.result.as_ref().unwrap().code,
+                elapsed.as_secs()
+            );
+            Ok(Response::new(response))
+        })
+        .await
+    }
+
+    async fn single_node(
+        &self,
+        request: Request<SingleNodeRequest>,
+    ) -> tonic::Result<Response<SingleNodeResponse>, Status> {
+        metrics::record_metrics("prover::single_node", || async {
+            tracing::info!(
+                "[single_node] {}:{} start",
+                request.get_ref().proof_id,
+                request.get_ref().computed_request_id,
+            );
+            let start = Instant::now();
+            let single_node_context = SingleNodeContext {
+                proof_id: request.get_ref().proof_id.to_string(),
+                program_id: request.get_ref().program_id.to_string(),
+                elf_path: request.get_ref().elf_path.to_string(),
+                elf: request.get_ref().elf.clone(),
+                base_dir: request.get_ref().base_dir.to_string(),
+                private_input_path: request.get_ref().private_input_path.to_string(),
+                private_inputs: request.get_ref().private_inputs.clone(),
+                receipt_inputs_path: request.get_ref().receipt_inputs_path.to_string(),
+                receipt_inputs: request.get_ref().receipt_inputs.clone(),
+                target_step: request.get_ref().target_step,
+                seg_size: request.get_ref().seg_size,
+                local_prover_threads: request.get_ref().local_prover_threads as usize,
+            };
+
+            let pipeline = self.pipeline.clone();
+            let single_node_func = move || pipeline.prove_single_node(&single_node_context);
+            let result = run_back_task(single_node_func).await;
+            let (proof, public_values, vk) = match &result {
+                Ok((_, _, p, pv, vk)) => (p.clone(), pv.clone(), vk.clone()),
+                _ => (vec![], vec![], vec![]),
+            };
+
+            let mut response = SingleNodeResponse {
+                proof_id: request.get_ref().proof_id.clone(),
+                computed_request_id: request.get_ref().computed_request_id.clone(),
+                total_steps: result.clone().unwrap_or_default().1,
+                proof,
+                public_values,
+                vk,
+                ..Default::default()
+            };
+
+            // True if and only if no error occurs and cycles > 0
+            let result: std::result::Result<(bool, Vec<u8>), String> = match result {
+                Ok(cycle) => Ok((cycle.1 > 0 && cycle.0, vec![])),
+                Err(e) => Err(e),
+            };
+            on_done!(result, response);
+            let end = Instant::now();
+            let elapsed = end.duration_since(start);
+            tracing::info!(
+                "[single node] {}:{} code:{} elapsed:{} end",
                 request.get_ref().proof_id,
                 request.get_ref().computed_request_id,
                 response.result.as_ref().unwrap().code,

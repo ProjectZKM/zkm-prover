@@ -12,21 +12,27 @@ anyhow = "1.0.97"
 once_cell = "1.13.0"
 zstd = "0.13.3"
 lru = "0.14.0"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
 
-zkm-core-machine = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-core-executor = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-stark = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-prover = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-recursion-compiler = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-recursion-core = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-recursion-circuit = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
-zkm-sdk = { git = "https://github.com/zkMIPS/zkMIPS", branch = "feat/network" }
+zkm-core-machine.workspace = true
+zkm-core-executor.workspace = true
+zkm-stark.workspace = true
+zkm-prover.workspace = true
+zkm-recursion-compiler.workspace = true
+zkm-recursion-core.workspace = true
+zkm-recursion-circuit.workspace = true
+zkm-sdk.workspace = true
 
-p3-maybe-rayon = { git = "https://github.com/zkMIPS/Plonky3" }
+p3-maybe-rayon.workspace = true
 
-common = { path = "../common" }
+zkm-gpu-prover = { git = "https://github.com/ProjectZKM/ziren-gpu", branch = "feat/multi-provers", optional = true }
+zkm-gpu-core = { git = "https://github.com/ProjectZKM/ziren-gpu", branch = "feat/multi-provers", optional = true }
+
+common.workspace = true
 tempfile = "3.18.0"
 lazy_static = "1.5.0"
 
 [features]
 debug = []
+gpu = ["dep:zkm-gpu-prover", "dep:zkm-gpu-core"]

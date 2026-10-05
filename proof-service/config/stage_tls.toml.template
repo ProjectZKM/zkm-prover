@@ -1,8 +1,10 @@
 addr = "{{addr}}"
 prover_addrs = [{{prover_addrs}}]
+database_url = "mysql://stage:123456@localhost:3306/zkm2"
 base_dir = "{{base_dir}}"
-fileserver_url = "/data/zkm/proof-service/"
-fileserver_addr = "0.0.0.0:40000"
+metrics_addr = "0.0.0.0:50012"
+proving_key_paths = ["/tmp/input-null/", "/tmp/input"]
+fileserver_url = "http://0.0.0.0:40000/test/test_proof/proof"
 
 ca_cert_path = "tools/certs/ca.pem"
 cert_path = "tools/certs/stage.pem"

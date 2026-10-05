@@ -1,11 +1,11 @@
 use crate::proto::includes::v1::Step;
-#[cfg(feature = "prover_v2")]
 use crate::stage::safe_read;
 use crate::stage::tasks::{
-    agg_task::AggTask, generate_task::GenerateTask, ProveTask, SnarkTask, SplitTask, Trace,
-    TASK_STATE_FAILED, TASK_STATE_INITIAL, TASK_STATE_PROCESSING, TASK_STATE_SUCCESS,
-    TASK_STATE_UNPROCESSED,
+    agg_task::AggTask, generate_task::GenerateTask, ProveTask, SingleNodeTask, SnarkTask,
+    SplitTask, Trace, TASK_STATE_FAILED, TASK_STATE_INITIAL, TASK_STATE_PROCESSING,
+    TASK_STATE_SUCCESS, TASK_STATE_UNPROCESSED,
 };
+use common::file;
 use rayon::prelude::*;
 use std::{
     fmt::{Debug, Formatter},
@@ -102,6 +102,7 @@ impl Stage {
     pub fn new(generate_task: GenerateTask) -> Self {
         Stage {
             //base_dir: generate_task.base_dir.clone(),
+            step: generate_task.from_step,
             generate_task,
             split_task: SplitTask::default(),
             prove_tasks: Vec::new(),
@@ -109,7 +110,6 @@ impl Stage {
             snark_task: SnarkTask::default(),
             is_error: false,
             errmsg: "".to_string(),
-            step: Step::Init,
             is_tasks_gen_done: false,
         }
     }
@@ -131,8 +131,7 @@ impl Stage {
                         self.gen_prove_task_post();
                         crate::metrics::SEGMENTS_GAUGE.set(self.prove_tasks.len() as f64);
                         tracing::info!(
-                            "proof_id {} done. Generate {} prove_tasks",
-                            self.generate_task.proof_id,
+                            "Split done. Generate {} prove_tasks",
                             self.prove_tasks.len()
                         );
                         if !self.generate_task.composite_proof {
@@ -173,6 +172,11 @@ impl Stage {
                         }
                     }
                 }
+            }
+            Step::Agg => {
+                assert_eq!(self.generate_task.from_step, Step::Agg);
+                self.gen_snark_task();
+                self.step = Step::Snark;
             }
             Step::Snark => {
                 if self.snark_task.state == TASK_STATE_SUCCESS {
@@ -266,7 +270,7 @@ impl Stage {
         }
         // Pre-allocate 64 tasks
         if self.prove_tasks.is_empty() {
-            self.prove_tasks = (0..64)
+            self.prove_tasks = (0..16)
                 .into_par_iter()
                 .map(|i| self.task_with_no(i))
                 .collect();
@@ -306,7 +310,6 @@ impl Stage {
             }
         }
 
-        #[cfg(feature = "prover_v2")]
         {
             let files = common::file::new(&self.generate_task.seg_path)
                 .read_dir()
@@ -336,15 +339,6 @@ impl Stage {
                 };
                 self.prove_tasks.push(prove_task);
             }
-        }
-
-        #[cfg(feature = "prover")]
-        if self.prove_tasks.len() < 2 {
-            self.is_error = true;
-            self.errmsg = format!(
-                "Segment count is {}, please reduce SEG_SIZE !",
-                self.prove_tasks.len()
-            );
         }
     }
 
@@ -398,49 +392,6 @@ impl Stage {
             .count()
     }
 
-    #[cfg(feature = "prover")]
-    pub fn gen_agg_tasks(&mut self) {
-        // FIXME: we don't have to wait all the prove tasks done for the single GenerateTask. We should keep track of the agg_index in the Stage structure.
-        let mut agg_index = 0;
-        let mut result = Vec::new();
-        let mut current_length = self.prove_tasks.len();
-        for i in (0..current_length - 1).step_by(2) {
-            agg_index += 1;
-            result.push(AggTask::init_from_two_prove_task(
-                &(self.prove_tasks[i]),
-                &(self.prove_tasks[i + 1]),
-                agg_index,
-            ));
-        }
-        if current_length % 2 == 1 {
-            result.push(AggTask::init_from_single_prove_task(
-                &(self.prove_tasks[current_length - 1]),
-                agg_index + 1,
-            ));
-        }
-        self.agg_tasks.append(&mut result.clone());
-
-        current_length = result.len();
-        while current_length > 1 {
-            let mut new_result = Vec::new();
-            for i in (0..current_length - 1).step_by(2) {
-                agg_index += 1;
-                let agg_task =
-                    AggTask::init_from_two_agg_task(&result[i], &result[i + 1], agg_index);
-                self.agg_tasks.push(agg_task.clone());
-                new_result.push(agg_task);
-            }
-            if current_length % 2 == 1 {
-                new_result.push(result[current_length - 1].clone());
-            }
-            result = new_result;
-            current_length = result.len();
-        }
-        let last_agg_tasks = self.agg_tasks.len() - 1;
-        self.agg_tasks[last_agg_tasks].is_final = true;
-    }
-
-    #[cfg(feature = "prover_v2")]
     pub fn gen_agg_tasks(&mut self) {
         use prover_v2::FIRST_LAYER_BATCH_SIZE;
         // The batch size for reducing two layers of recursion.
@@ -580,11 +531,26 @@ impl Stage {
         self.snark_task.task_id = uuid::Uuid::new_v4().to_string();
         self.snark_task.state = TASK_STATE_UNPROCESSED;
         // fill in the input receipts
-        for agg_task in &self.agg_tasks {
-            if agg_task.is_final {
-                self.snark_task.agg_receipt = agg_task.output.clone();
+        if self.generate_task.from_step == Step::Init {
+            for agg_task in &self.agg_tasks {
+                if agg_task.is_final {
+                    self.snark_task.agg_receipt = agg_task.output.clone();
+                    self.snark_task.from_input = false;
+                }
             }
+        } else if self.generate_task.from_step == Step::Agg {
+            // read from receipt_inputs_path
+            let receipt_datas = std::fs::read(&self.generate_task.receipt_inputs_path).unwrap();
+            let receipts = bincode::deserialize::<Vec<Vec<u8>>>(&receipt_datas).unwrap();
+            self.snark_task.agg_receipt = receipts[0].clone();
+            self.snark_task.from_input = true;
+        } else {
+            unreachable!(
+                "gen_snark_task: unsupported from_step: {:?}",
+                self.generate_task.from_step
+            );
         }
+
         tracing::info!(
             "gen_snark_task: {:?} {:?}",
             self.snark_task.proof_id,
@@ -611,6 +577,85 @@ impl Stage {
             .unwrap_or_else(|_| panic!("can not open {}", &self.generate_task.snark_path));
         f.write_all(&snark_task.output).unwrap();
         on_task!(snark_task, dst, self);
+    }
+    pub fn get_single_node_task(&self) -> SingleNodeTask {
+        let elf = safe_read(&self.generate_task.elf_path);
+        let private_inputs = if self.generate_task.private_input_path.is_empty() {
+            Vec::new()
+        } else {
+            std::fs::read(&self.generate_task.private_input_path)
+                .ok()
+                .and_then(|data| {
+                    if data.is_empty() {
+                        Some(Vec::new())
+                    } else {
+                        bincode::deserialize::<Vec<Vec<u8>>>(&data).ok()
+                    }
+                })
+                .unwrap_or_default()
+        };
+        let receipt_inputs = if self.generate_task.receipt_inputs_path.is_empty() {
+            Vec::new()
+        } else {
+            std::fs::read(&self.generate_task.receipt_inputs_path)
+                .ok()
+                .and_then(|data| {
+                    if data.is_empty() {
+                        Some(Vec::new())
+                    } else {
+                        bincode::deserialize::<Vec<Vec<u8>>>(&data).ok()
+                    }
+                })
+                .unwrap_or_default()
+        };
+        SingleNodeTask {
+            task_id: uuid::Uuid::new_v4().to_string(),
+            program_id: self.generate_task.program_id.clone(),
+            base_dir: self.generate_task.base_dir.clone(),
+            proof_id: self.generate_task.proof_id.clone(),
+            state: TASK_STATE_UNPROCESSED,
+            elf_path: self.generate_task.elf_path.clone(),
+            elf,
+            private_input_path: self.generate_task.private_input_path.clone(),
+            private_inputs,
+            receipt_inputs_path: self.generate_task.receipt_inputs_path.clone(),
+            receipt_inputs,
+            target_step: self.generate_task.target_step,
+            seg_size: self.generate_task.seg_size,
+            // In single node task, we use max_prover_num as number of local provers
+            local_prover_threads: self.generate_task.max_prover_num,
+            ..Default::default()
+        }
+    }
+    pub fn on_single_node_task(&mut self, single_node_task: &SingleNodeTask) {
+        if single_node_task.state == TASK_STATE_SUCCESS {
+            tracing::info!(
+                "Single node task {} success, output size: {}",
+                single_node_task.task_id,
+                single_node_task.proof.len()
+            );
+            if self.generate_task.target_step == Step::Agg {
+                // Here we also use snark_path to store agg proof ;
+                let mut f = std::fs::File::create(&self.generate_task.snark_path)
+                    .unwrap_or_else(|_| panic!("can not open {}", &self.generate_task.snark_path));
+                f.write_all(&single_node_task.proof).unwrap();
+            }
+            // store public values
+            let public_values_path =
+                format!("{}/wrap/public_values.bin", single_node_task.base_dir);
+            file::new(&public_values_path)
+                .write_all(&single_node_task.public_values)
+                .unwrap();
+            // store vk
+            let vk_path = format!("{}/vk.bin", single_node_task.base_dir);
+            file::new(&vk_path)
+                .write_all(&single_node_task.vk)
+                .unwrap_or_default();
+            self.step = Step::End;
+        } else {
+            self.is_error = true;
+            tracing::error!("Single node task {} failed", single_node_task.task_id);
+        }
     }
 }
 
@@ -659,35 +704,35 @@ impl Debug for Stage {
     }
 }
 
-#[cfg(test)]
-#[cfg(feature = "prover")]
-mod tests {
-    use super::*;
-    #[test]
-    fn test_gen_agg_tasks() {
-        for n in 12..20 {
-            let mut stage = Stage::default();
-            for i in 0..n {
-                stage.prove_tasks.insert(
-                    i,
-                    ProveTask {
-                        output: vec![1, 2, 3],
-                        file_no: i,
-                        ..Default::default()
-                    },
-                );
-            }
-            stage.gen_agg_tasks();
-            stage.agg_tasks.iter().for_each(|element| {
-                let left = element.inputs.first().is_some_and(|input| input.is_agg);
-                let right = element.inputs.get(1).is_some_and(|input| input.is_agg);
-
-                println!(
-                    "agg: left:{} right:{} final:{}",
-                    left, right, element.is_final,
-                );
-            });
-            assert!(stage.agg_tasks.len() <= n);
-        }
-    }
-}
+//#[cfg(test)]
+//#[cfg(feature = "prover")]
+//mod tests {
+//    use super::*;
+//    #[test]
+//    fn test_gen_agg_tasks() {
+//        for n in 12..20 {
+//            let mut stage = Stage::default();
+//            for i in 0..n {
+//                stage.prove_tasks.insert(
+//                    i,
+//                    ProveTask {
+//                        output: vec![1, 2, 3],
+//                        file_no: i,
+//                        ..Default::default()
+//                    },
+//                );
+//            }
+//            stage.gen_agg_tasks();
+//            stage.agg_tasks.iter().for_each(|element| {
+//                let left = element.inputs.first().is_some_and(|input| input.is_agg);
+//                let right = element.inputs.get(1).is_some_and(|input| input.is_agg);
+//
+//                println!(
+//                    "agg: left:{} right:{} final:{}",
+//                    left, right, element.is_final,
+//                );
+//            });
+//            assert!(stage.agg_tasks.len() <= n);
+//        }
+//    }
+//}

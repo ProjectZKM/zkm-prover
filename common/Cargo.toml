@@ -6,8 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.75"
-tokio = { version = "1", features = ["full"] }
-tonic = { version = "0.8.1", features = ["tls", "transport"] }
+anyhow = { workspace = true } 
+tokio = { workspace = true }
+tonic = { workspace = true } 
 aws-config = { version = "1.1.9", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1.21.0"

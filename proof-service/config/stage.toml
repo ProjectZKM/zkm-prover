@@ -1,9 +1,11 @@
 addr = "0.0.0.0:50000"
-metrics_addr = "0.0.0.0:50010"
-database_url = "mysql://stage:123456@localhost:13306/zkm"
-# Must be: $zkm url, $zkm2 url
-proving_key_paths = []
-prover_addrs = ["127.0.0.1:50001"]
+prover_addrs = ["localhost:50001"]
+metrics_addr = "0.0.0.0:50012"
+database_url = "mysql://stage:123456@localhost:3306/zkm2"
 base_dir = "/tmp/zkm/test/test_proof"
-fileserver_url = "/tmp/zkm/fileserver"
-fileserver_addr = "0.0.0.0:40000"
+fileserver_url = "http://0.0.0.0:40000/test/test_proof"
+proving_key_paths = ["/tmp/input-null/", "/tmp/input"]
+
+ca_cert_path = "/home/ubuntu/sd/zkm-prover/tools/certs/ca.pem"
+cert_path = "/home/ubuntu/sd/zkm-prover/tools/certs/stage.pem"
+key_path = "/home/ubuntu/sd/zkm-prover/tools/certs/stage.key"

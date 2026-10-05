@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # You should provide some variable to use this config bash
-provers=("localhost:50001" "localhost:50002")
+#provers=("localhost:50001" "localhost:50002")
+provers=("localhost:50001")
 stage="localhost:50000"
 snarks=("localhost:50051")
 tls=false
